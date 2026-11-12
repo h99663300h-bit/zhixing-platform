@@ -49,8 +49,8 @@ async function main() {
   base = 'http://127.0.0.1:' + server.address().port;
   expect(await api('GET', '/api/health'), 200, 'health');
   expect(await api('POST', '/api/auth/login', { email: 'teacher@university.edu', password: 'Teacher123!' }, 'teacher'), 200, 'teacher login');
-  const first = expect(await api('POST', '/api/auth/register', { name: '学生甲', email: 'v2a@example.edu', studentId: 'V2STU0001', password: 'SafePassword123!' }, 'studentA'), 201, 'student A registration').user;
-  expect(await api('POST', '/api/auth/register', { name: '学生乙', email: 'v2b@example.edu', studentId: 'V2STU0002', password: 'SafePassword123!' }, 'studentB'), 201, 'student B registration');
+  const first = expect(await api('POST', '/api/auth/register', { name: '学生甲', email: 'v2a@example.edu', studentId: '20260001', password: 'SafePassword123!' }, 'studentA'), 201, 'student A registration').user;
+  expect(await api('POST', '/api/auth/register', { name: '学生乙', email: 'v2b@example.edu', studentId: '20260002', password: 'SafePassword123!' }, 'studentB'), 201, 'student B registration');
 
   // Enrollment codes are teacher-owned secrets and gates for joining a course.
   const created = expect(await api('POST', '/api/courses', {

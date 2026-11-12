@@ -32,11 +32,11 @@ async function main() {
   base = 'http://127.0.0.1:' + server.address().port;
   assert.equal((await request('GET', '/api/profile')).status, 401, 'profile requires login');
   const original = expect(await request('POST', '/api/auth/register', {
-    name: '个人资料测试', email: 'profile.student@example.edu', studentId: 'PROFILE2026', password: 'StrongPass123!'
+    name: '个人资料测试', email: 'profile.student@example.edu', studentId: '20260026', password: 'StrongPass123!'
   }, 'student'), 201, 'register').user;
   assert.equal(original.role, 'student');
   const before = expect(await request('GET', '/api/profile', undefined, 'student'), 200, 'student profile').profile;
-  assert.equal(before.studentId, 'PROFILE2026');
+  assert.equal(before.studentId, '20260026');
   assert.equal(before.name, '个人资料测试');
   assert.equal(before.grade ?? '', '', 'new user grade is empty');
   assert.equal(before.gender ?? '', '', 'new user gender is empty');
@@ -46,13 +46,13 @@ async function main() {
   assert.equal(changed.name, '修改后的姓名');
   assert.equal(changed.gender, '女');
   assert.equal(changed.grade, '2026级');
-  assert.equal(changed.studentId, 'PROFILE2026');
+  assert.equal(changed.studentId, '20260026');
   for (const [key, value] of Object.entries({ studentId:'HACK2026', role:'teacher', email:'changed@example.edu' })) {
     const result = await request('PATCH', '/api/profile', { [key]:value }, 'student');
     assert.equal(result.status, 400, key + ' cannot be modified');
   }
   const retained = expect(await request('GET', '/api/profile', undefined, 'student'), 200, 'profile after rejected changes').profile;
-  assert.equal(retained.studentId, 'PROFILE2026');
+  assert.equal(retained.studentId, '20260026');
   assert.equal(retained.email, 'profile.student@example.edu');
   assert.equal(retained.role, 'student');
   expect(await request('POST', '/api/auth/login', { email:'teacher@university.edu', password:'Teacher123!' }, 'teacher'), 200, 'teacher login');
@@ -93,7 +93,7 @@ async function main() {
   assert.equal(fs.readdirSync(process.env.UPLOAD_DIR).length, 1, 'old avatar file removed on replacement');
   const saved = JSON.parse(fs.readFileSync(process.env.DATA_FILE, 'utf8'));
   const savedStudent = saved.users.find(u => u.id === original.id);
-  assert.equal(savedStudent.studentId, 'PROFILE2026');
+  assert.equal(savedStudent.studentId, '20260026');
   assert.equal(savedStudent.name, '修改后的姓名');
   assert.equal(savedStudent.gender, '女');
   assert.equal(savedStudent.grade, '2026级');

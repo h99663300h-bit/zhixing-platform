@@ -158,7 +158,7 @@ function getUser(req) {
 function publicUser(user) {
   if (!user) return null;
   const school = db.schools.find(item => item.id === user.schoolId);
-  return { id: user.id, role: user.role, name: user.name, email: user.email, studentId: user.studentId, gender: user.gender || '', grade: user.grade || '', active: user.active !== false,
+  return { id: user.id, role: user.role, name: user.name, email: user.email, studentId: user.studentId, accountId: user.accountId || user.studentId || null, gender: user.gender || '', grade: user.grade || '', active: user.active !== false,
     school: school ? { id: school.id, name: school.name, code: school.code } : null, avatarUrl: user.avatarFile ? '/api/profile/avatar/' + encodeURIComponent(user.id) : '' };
 }
 function requireUser(user) { if (!user) fail(401, 'Please sign in first'); return user; }
@@ -441,7 +441,7 @@ async function api(req, res, url) {
   if (pathname === '/api/profile' && method === 'GET') return json(res, 200, { profile: publicUser(requireUser(user)) });
   if (pathname === '/api/profile' && method === 'PATCH') {
     requireUser(user);
-    if (Object.keys(body).some(key => !['name', 'gender', 'grade'].includes(key))) fail(400, 'Student ID, email, and account role cannot be changed');
+    if (Object.keys(body).some(key => !['name', 'gender', 'grade'].includes(key))) fail(400, 'Account ID, student ID, email, and account role cannot be changed');
     const next = {};
     if (body.name !== undefined) next.name = safeText(body.name, 'Name', 60);
     if (body.gender !== undefined) {
@@ -496,20 +496,42 @@ async function api(req, res, url) {
     fs.createReadStream(file).pipe(res);
     return;
   }
+  function accountIdTaken(value) {
+    const key = String(value || '').toLowerCase();
+    return Boolean(key && db.users.some(u => u.accountId?.toLowerCase() === key || u.studentId?.toLowerCase() === key));
+  }
+  function validateRoleAccountId(role, raw) {
+    const label = role === 'student' ? 'Student Account ID' : role === 'teacher' ? 'Instructor Account ID' : 'Administrator Account ID';
+    const value = safeText(raw, label, 32);
+    if (role === 'student') {
+      if (!/^\d{4,32}$/.test(value)) fail(400, 'Student account ID must contain only digits (4–32 digits)');
+      return value;
+    }
+    const normalized = value.toLowerCase();
+    if (role === 'teacher') {
+      if (!/^tch\d{2,24}$/.test(normalized)) fail(400, 'Instructor account ID must start with tch followed by digits (e.g. tch202601)');
+      return normalized;
+    }
+    if (role === 'admin') {
+      if (!/^sch\d{2,24}$/.test(normalized)) fail(400, 'Administrator account ID must start with sch followed by digits (e.g. sch20260101)');
+      return normalized;
+    }
+    fail(400, 'Invalid account role');
+  }
   if (pathname === '/api/auth/register' && method === 'POST') {
     const name = safeText(body.name, 'Name', 60);
     const email = safeText(body.email, 'Email', 254).toLowerCase();
     const role = body.role === undefined ? 'student' : body.role;
     if (!['student', 'teacher'].includes(role)) fail(400, 'Invalid account role');
     if (role === 'teacher' && body.studentId != null && body.studentId !== '') fail(400, 'Teacher accounts do not need a student ID');
-    const studentId = role === 'student' ? safeText(body.studentId, 'Student ID', 32).toUpperCase() : null;
+    const accountId = validateRoleAccountId(role, role === 'student' ? (body.accountId ?? body.studentId) : body.accountId);
+    const studentId = role === 'student' ? accountId : null;
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail(400, 'Enter a valid email address');
-    if (role === 'student' && !/^[A-Z0-9_-]{5,32}$/.test(studentId)) fail(400, 'Student ID must contain 5–32 letters, numbers, underscores, or hyphens');
     if (typeof body.password !== 'string' || body.password.length < 8 || body.password.length > 128) fail(400, 'Password must contain 8–128 characters');
     if (db.users.some(u => u.email.toLowerCase() === email)) fail(409, 'This email is already registered');
-    if (role === 'student' && db.users.some(u => u.studentId?.toUpperCase() === studentId)) fail(409, 'This student ID is already registered; each student can have only one account');
+    if (accountIdTaken(accountId)) fail(409, role === 'student' ? 'This student ID is already registered; each student can have only one account' : 'This account ID is already registered');
     const school = resolveSchoolFields(body);
-    const newUser = { id: id('user'), role, name, email, studentId, schoolId: school?.id || null, passwordHash: hashPassword(body.password), createdAt: now() };
+    const newUser = { id: id('user'), role, name, email, studentId, accountId, schoolId: school?.id || null, passwordHash: hashPassword(body.password), createdAt: now() };
     db.users.push(newUser); save();
     const token = crypto.randomBytes(32).toString('hex');
     sessions.set(crypto.createHash('sha256').update(token).digest('hex'), { userId: newUser.id, expiresAt: Date.now() + SESSION_MS });
@@ -518,17 +540,19 @@ async function api(req, res, url) {
   if (pathname === '/api/auth/register-admin' && method === 'POST') {
     const name = safeText(body.name, 'Name', 60);
     const email = safeText(body.email, 'Email', 254).toLowerCase();
+    const accountId = validateRoleAccountId('admin', body.accountId);
     const schoolName = safeText(body.schoolName, 'School name', 100);
     const requestedCode = safeText(body.schoolCode ?? '', 'School code', 16, false).toUpperCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail(400, 'Enter a valid email address');
     if (typeof body.password !== 'string' || body.password.length < 8 || body.password.length > 128) fail(400, 'Password must contain 8–128 characters');
     if (db.users.some(u => u.email.toLowerCase() === email)) fail(409, 'This email is already registered');
+    if (accountIdTaken(accountId)) fail(409, 'This account ID is already registered');
     if (db.schools.some(school => normalizeSchoolName(school.name) === normalizeSchoolName(schoolName))) fail(409, 'This school already has an organization. Sign in with its administrator account or contact the site administrator.');
     if (requestedCode && !/^[A-Z0-9_-]{4,16}$/.test(requestedCode)) fail(400, 'School code must contain 4–16 letters, numbers, underscores, or hyphens');
     const code = requestedCode || schoolCode();
     if (schoolCodeExists(code)) fail(409, 'This school code is already in use');
     const school = { id: id('school'), name: schoolName, code, createdAt: now() };
-    const newUser = { id: id('user'), role: 'admin', adminScope: 'school', schoolId: school.id, name, email, studentId: null, passwordHash: hashPassword(body.password), active: true, createdAt: now() };
+    const newUser = { id: id('user'), role: 'admin', adminScope: 'school', schoolId: school.id, name, email, studentId: null, accountId, passwordHash: hashPassword(body.password), active: true, createdAt: now() };
     db.schools.push(school);
     db.users.push(newUser);
     try { save(); } catch (error) { db.schools.pop(); db.users.pop(); throw error; }
@@ -537,15 +561,19 @@ async function api(req, res, url) {
     return json(res, 201, { user: publicUser(newUser) }, { 'Set-Cookie': sessionCookie(req, token, SESSION_MS / 1000) });
   }
   if (pathname === '/api/auth/login' && method === 'POST') {
-    const email = safeText(body.email, 'Email', 254).toLowerCase();
+    const identifier = safeText(body.identifier ?? body.account ?? body.email, 'Account ID or Email', 254).toLowerCase();
     const password = typeof body.password === 'string' ? body.password : '';
-    const bucket = `${req.socket.remoteAddress || ''}:${email}`;
+    const bucket = `${req.socket.remoteAddress || ''}:${identifier}`;
     const failure = loginFailures.get(bucket);
     if (failure && failure.until > Date.now() && failure.count >= 8) fail(429, 'Too many login attempts. Please try again later');
-    const found = db.users.find(u => u.email.toLowerCase() === email && u.active !== false);
+    const found = db.users.find(u => u.active !== false && (
+      u.email.toLowerCase() === identifier ||
+      (u.accountId && u.accountId.toLowerCase() === identifier) ||
+      (u.studentId && u.studentId.toLowerCase() === identifier)
+    ));
     if (!found || !checkPassword(password, found.passwordHash)) {
       loginFailures.set(bucket, { count: (failure?.until > Date.now() ? failure.count : 0) + 1, until: Date.now() + 15 * 60_000 });
-      fail(401, 'Incorrect email or password');
+      fail(401, 'Incorrect account ID/email or password');
     }
     loginFailures.delete(bucket);
     const token = crypto.randomBytes(32).toString('hex');
@@ -611,7 +639,9 @@ async function api(req, res, url) {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail(400, 'Enter a valid email address');
     if (db.users.some(u => u.email.toLowerCase() === email)) fail(409, 'This email is already registered');
     if (typeof body.password !== 'string' || body.password.length < 8 || body.password.length > 128) fail(400, 'Password must contain 8–128 characters');
-    const teacher = { id: id('user'), role: 'teacher', name, email, studentId: null, schoolId: isGlobalAdmin(user) ? null : user.schoolId, passwordHash: hashPassword(body.password), active: true, createdAt: now() };
+    const accountId = body.accountId != null && body.accountId !== '' ? validateRoleAccountId('teacher', body.accountId) : null;
+    if (accountId && accountIdTaken(accountId)) fail(409, 'This account ID is already registered');
+    const teacher = { id: id('user'), role: 'teacher', name, email, studentId: null, accountId, schoolId: isGlobalAdmin(user) ? null : user.schoolId, passwordHash: hashPassword(body.password), active: true, createdAt: now() };
     db.users.push(teacher); save(); return json(res, 201, { user: publicUser(teacher) });
   }
   let adminMatch = pathname.match(/^\/api\/admin\/teachers\/([^/]+)$/);

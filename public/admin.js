@@ -42,33 +42,27 @@
   authPage = function() {
     if (state.authMode === 'forgot' || state.authMode === 'reset') return authRecoveryPage();
     let html = originalAuthPage();
-    const start = html.indexOf('<div class="auth-role"');
-    const end = start < 0 ? -1 : html.indexOf('</div>', start);
-    if (end >= 0) {
-      let roleBar = html.slice(start, end);
-      roleBar = roleBar.replace('class="auth-role"', 'class="auth-role" style="grid-template-columns:repeat(3,minmax(0,1fr))"');
-      roleBar = roleBar.replace(/class="[^"]*" data-action="auth-role" data-role="(student|teacher)"/g, (match, role) => match.replace(/class="[^"]*"/, 'class="' + (state.authRole === role ? 'active' : '') + '"'));
-      roleBar += '<button type="button" class="' + (state.authRole === 'admin' ? 'active' : '') + '" data-action="auth-role" data-role="admin">⚙ Admin ' + (state.authMode === 'register' ? 'Registration' : 'Portal') + '</button>';
-      html = html.slice(0, start) + roleBar + html.slice(end);
-    }
-    if (state.authMode === 'register' && state.authRole !== 'admin') {
-      html = html.replace('<div class="field"><label for="auth-email">Email Address</label>', '<div class="field"><label for="auth-school">School / Organization (optional)</label><input id="auth-school" name="school" maxlength="100" placeholder="Enter a school code or exact school name"><div class="field-hint">For example: 1008611 or Peking University. You can join later from your profile.</div></div><div class="field"><label for="auth-email">Email Address</label>');
-    }
-    if (state.authRole === 'admin') {
-      html = html.replace('Open Instructor Dashboard →', 'Open Admin Dashboard →');
-      html = html.replace('Choose your role to sign in to your workspace.', 'Sign in with your administrator account.');
-      if (state.authMode === 'register') {
+    if (state.authMode === 'register') {
+      const start = html.indexOf('<div class="auth-role"');
+      const end = start < 0 ? -1 : html.indexOf('</div>', start);
+      if (end >= 0) {
+        let roleBar = html.slice(start, end);
+        roleBar = roleBar.replace('class="auth-role"', 'class="auth-role" style="grid-template-columns:repeat(3,minmax(0,1fr))"');
+        roleBar = roleBar.replace(/class="[^"]*" data-action="auth-role" data-role="(student|teacher)"/g, (match, role) => match.replace(/class="[^"]*"/, 'class="' + (state.authRole === role ? 'active' : '') + '"'));
+        roleBar += '<button type="button" class="' + (state.authRole === 'admin' ? 'active' : '') + '" data-action="auth-role" data-role="admin">⚙ Administrator</button>';
+        html = html.slice(0, start) + roleBar + html.slice(end);
+      }
+      if (state.authRole !== 'admin') {
+        html = html.replace('<div class="field"><label for="auth-email">Email Address</label>', '<div class="field"><label for="auth-school">School / Organization (optional)</label><input id="auth-school" name="school" maxlength="100" placeholder="Enter a school code or exact school name"><div class="field-hint">For example: 1008611 or Peking University. You can join later from your profile.</div></div><div class="field"><label for="auth-email">Email Address</label>');
+      } else {
         html = html.replace('Create Your Teaching Workspace', 'Create a School Organization');
         html = html.replace('Create an instructor account, then create courses and share enrollment codes with students.', 'Create your school organization and invite instructors and students with its code or exact name.');
+        html = html.replace('Instructor Account ID', 'Administrator Account ID');
+        html = html.replace('For example tch202601', 'For example sch20260101');
+        html = html.replace('Must start with tch followed by digits (e.g. tch202601).', 'Must start with sch followed by digits (e.g. sch20260101).');
         html = html.replace('<div class="field"><label for="auth-email">Email Address</label>', '<div class="field"><label for="auth-school-name">School / Organization Name</label><input id="auth-school-name" name="schoolName" maxlength="100" placeholder="For example, Peking University" required></div><div class="field"><label for="auth-school-code">School Code (optional)</label><input id="auth-school-code" name="schoolCode" maxlength="16" placeholder="For example, 1008611"><div class="field-hint">Leave blank to generate a code automatically.</div></div><div class="field"><label for="auth-email">Email Address</label>');
         html = html.replace('Create Instructor Account →', 'Create School Administrator Account →');
         html = html.replace('Already have an account?', 'Already have an administrator account?');
-        html = html.replace('Register Instructor Account', 'Register School Administrator Account');
-      } else {
-        html = html.replace('New to Zhixing?', 'Administrator access');
-        html = html.replace('Need an account?', 'Setting up a school?');
-        html = html.replace('Create Instructor Account →', 'Create School Administrator Account →');
-        html = html.replace('Register Instructor Account', 'Create School Administrator Account');
       }
     }
     if (state.authMode === 'login') {
@@ -222,7 +216,7 @@
 
   // Handle administrator sign-in and school creation before the shared auth form listener.
   document.addEventListener('submit', event => {
-    if (event.target.id !== 'auth-form' || state.authRole !== 'admin') return;
+    if (event.target.id !== 'auth-form' || state.authMode !== 'register' || state.authRole !== 'admin') return;
     event.preventDefault(); event.stopImmediatePropagation();
     const values = Object.fromEntries(new FormData(event.target));
     run(async () => {

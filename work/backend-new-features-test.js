@@ -61,8 +61,8 @@ async function main() {
   const teacher = ok(await api('POST', '/api/admin/teachers', { name:'Instructor A', email:'teacher@outlook.com', password:'TeacherPass123!' }, 'admin'), 201, 'admin adds teacher').user;
   assert.equal(teacher.role, 'teacher');
   ok(await api('POST', '/api/auth/login', { email:'teacher@outlook.com', password:'TeacherPass123!' }, 'teacher'), 200, 'teacher login with common provider');
-  const student = ok(await api('POST', '/api/auth/register', { role:'student', name:'Student A', email:'student@gmail.com', studentId:'STUD2026001', password:'StudentPass123!' }, 'student'), 201, 'student signup with common provider').user;
-  const peer = ok(await api('POST', '/api/auth/register', { role:'student', name:'Student B', email:'peer@yahoo.com', studentId:'STUD2026002', password:'StudentPass123!' }, 'peer'), 201, 'second student signup').user;
+  const student = ok(await api('POST', '/api/auth/register', { role:'student', name:'Student A', email:'student@gmail.com', studentId:'20260001', password:'StudentPass123!' }, 'student'), 201, 'student signup with common provider').user;
+  const peer = ok(await api('POST', '/api/auth/register', { role:'student', name:'Student B', email:'peer@yahoo.com', studentId:'20260002', password:'StudentPass123!' }, 'peer'), 201, 'second student signup').user;
   const course = ok(await api('POST', '/api/courses', { title:'Biology 101', category:'Science', description:'Test course', enrollmentCode:'BIO-2026' }, 'teacher'), 201, 'teacher creates course').course;
   const lesson = ok(await api('POST', `/api/courses/${course.id}/lessons`, { title:'Unit 1', type:'reading', content:'Lesson content' }, 'teacher'), 201, 'teacher creates lesson').lesson;
   const folders = `/api/lessons/${lesson.id}/folders`;

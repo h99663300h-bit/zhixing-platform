@@ -30,18 +30,18 @@ async function main() {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   base = `http://127.0.0.1:${server.address().port}`;
 
-  const teacherA = expect(await api('POST', '/api/auth/register', { role: 'teacher', name: '甲教师', email: 'teacher-a@example.edu', password: 'SafePassword123!' }, 'teacherA'), 201, 'teacher A registers').user;
-  const teacherB = expect(await api('POST', '/api/auth/register', { role: 'teacher', name: '乙教师', email: 'teacher-b@example.edu', password: 'SafePassword123!' }, 'teacherB'), 201, 'teacher B registers').user;
+  const teacherA = expect(await api('POST', '/api/auth/register', { role: 'teacher', accountId: 'tch202601', name: '甲教师', email: 'teacher-a@example.edu', password: 'SafePassword123!' }, 'teacherA'), 201, 'teacher A registers').user;
+  const teacherB = expect(await api('POST', '/api/auth/register', { role: 'teacher', accountId: 'tch202602', name: '乙教师', email: 'teacher-b@example.edu', password: 'SafePassword123!' }, 'teacherB'), 201, 'teacher B registers').user;
   assert.equal(teacherA.role, 'teacher');
   assert.equal(teacherA.studentId, null);
   assert.equal(teacherB.role, 'teacher');
   assert.equal((await api('GET', '/api/auth/me', undefined, 'teacherA')).data.user?.id, teacherA.id, 'teacher registration starts own session');
-  assert.equal((await api('POST', '/api/auth/register', { role: 'teacher', name: '重复教师', email: 'teacher-a@example.edu', password: 'SafePassword123!' })).status, 409, 'duplicate email rejected');
+  assert.equal((await api('POST', '/api/auth/register', { role: 'teacher', accountId: 'tch202603', name: '重复教师', email: 'teacher-a@example.edu', password: 'SafePassword123!' })).status, 409, 'duplicate email rejected');
   assert.equal((await api('POST', '/api/auth/register', { role: 'admin', name: '非法角色', email: 'bad-role@example.edu', password: 'SafePassword123!' })).status, 400, 'unrecognized role rejected');
   assert.equal((await api('POST', '/api/auth/register', { role: 'teacher', name: '非法学号', email: 'bad-id@example.edu', studentId: '20260001', password: 'SafePassword123!' })).status, 400, 'teacher registration rejects student ID');
-  const student = expect(await api('POST', '/api/auth/register', { role: 'student', name: '测试学生', email: 'student@example.edu', studentId: 'NEWSTU2026', password: 'SafePassword123!' }, 'student'), 201, 'student registers').user;
+  const student = expect(await api('POST', '/api/auth/register', { role: 'student', name: '测试学生', email: 'student@example.edu', studentId: '20260101', password: 'SafePassword123!' }, 'student'), 201, 'student registers').user;
   assert.equal(student.role, 'student');
-  assert.equal(student.studentId, 'NEWSTU2026');
+  assert.equal(student.studentId, '20260101');
 
   const ownA = expect(await api('POST', '/api/courses', courseInput('甲教师课程', 'CODE-A-26'), 'teacherA'), 201, 'teacher A creates own course').course;
   const ownB = expect(await api('POST', '/api/courses', courseInput('乙教师课程', 'CODE-B-26'), 'teacherB'), 201, 'teacher B creates own course').course;
