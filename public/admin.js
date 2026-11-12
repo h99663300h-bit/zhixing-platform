@@ -9,6 +9,8 @@
   let adminError = '';
   let adminTab = 'teachers';
   let adminDialog = null;
+  let deptDialogUser = null;
+  let annEditItem = null;
   let teacherFilter = { q: '', department: '', major: '', status: '' };
   let studentFilter = { q: '', department: '', major: '', gender: '' };
 
@@ -88,6 +90,40 @@
     return hay.includes(q.toLowerCase());
   }
 
+  const ANN_CATEGORIES = { school: 'School Information (学校信息)', college: 'College Information (学院信息)', academic: 'Academic Affairs (教务管理)' };
+  function departmentPanel() {
+    const depts = adminData?.departments || [];
+    const tags = depts.map(d => '<span class="pill blue" style="display:inline-flex;align-items:center;gap:6px">' + esc(d.name) +
+      (d.id ? '<button type="button" data-admin-action="delete-dept" data-id="' + esc(d.id) + '" style="border:0;background:none;color:inherit;cursor:pointer;font-weight:800;padding:0" title="Remove">×</button>' : '') +
+      '</span>').join('');
+    return '<section class="panel panel-pad" style="margin-bottom:20px"><div class="row-between wrap"><div><h2>Department Management (院系管理)</h2>' +
+      '<p class="small muted">Manage departments for your school and assign instructors or students below.</p></div></div>' +
+      '<div class="row wrap" style="gap:8px;margin:10px 0 14px">' + (tags || '<span class="small muted">No departments configured yet.</span>') + '</div>' +
+      '<form id="admin-add-dept-form"><div class="row wrap"><input name="name" maxlength="80" placeholder="Enter department name (e.g. 计算机学院)" required style="max-width:320px">' +
+      '<button type="submit" class="btn btn-soft btn-sm">+ Add Department</button></div></form></section>';
+  }
+  function announcementsTable() {
+    const list = adminData?.announcements || [];
+    const editing = annEditItem;
+    const formHtml = '<section class="panel panel-pad" style="margin-bottom:20px"><h2>' + (editing ? 'Edit Announcement' : 'Publish Information Announcement') + '</h2>' +
+      '<p class="small muted">Published announcements appear on the main dashboard for all instructors and students in your school.</p>' +
+      '<form id="admin-announcement-form"' + (editing ? ' data-id="' + esc(editing.id) + '"' : '') + '>' +
+      '<div class="form-grid"><div class="field"><label for="ann-category">Category</label><select id="ann-category" name="category">' +
+      Object.entries(ANN_CATEGORIES).map(([k, label]) => '<option value="' + k + '"' + (editing?.category === k ? ' selected' : '') + '>' + label + '</option>').join('') +
+      '</select></div><div class="field"><label for="ann-title">Title</label><input id="ann-title" name="title" value="' + esc(editing?.title || '') + '" maxlength="120" placeholder="Announcement title" required></div></div>' +
+      '<div class="field"><label for="ann-content">Content</label><textarea id="ann-content" name="content" rows="4" maxlength="5000" placeholder="Write announcement details…" required>' + esc(editing?.content || '') + '</textarea></div>' +
+      '<div class="row wrap"><button type="submit" class="btn btn-primary">' + (editing ? 'Save Changes' : 'Publish Announcement') + '</button>' +
+      (editing ? '<button type="button" class="btn btn-light" data-admin-action="cancel-edit-ann">Cancel</button>' : '') + '</div></form></section>';
+    const rows = list.length ? list.map(a => '<section class="panel panel-pad" style="margin-bottom:14px"><div class="row-between wrap"><div>' +
+      '<span class="pill blue">' + esc(ANN_CATEGORIES[a.category] || a.category) + '</span> ' +
+      '<strong style="font-size:16px;margin-left:6px">' + esc(a.title) + '</strong>' +
+      '<div class="tiny muted" style="margin-top:4px">By ' + esc(a.authorName || 'Administrator') + ' · ' + fmtDate(a.updatedAt || a.createdAt) + '</div></div>' +
+      '<div class="row wrap"><button type="button" class="btn btn-soft btn-sm" data-admin-action="edit-ann" data-id="' + esc(a.id) + '">Edit</button>' +
+      '<button type="button" class="btn btn-danger btn-sm" data-admin-action="delete-ann" data-id="' + esc(a.id) + '">Delete</button></div></div>' +
+      '<p style="margin:12px 0 0;white-space:pre-wrap">' + esc(a.content) + '</p></section>').join('')
+      : em('No announcements yet', 'Publish school, college, or academic affairs announcements above.');
+    return formHtml + rows;
+  }
   function instructorTable() {
     const allTeachers = adminData?.teachers || [];
     const pending = adminData?.pendingTeachers || [];
@@ -125,9 +161,9 @@
       '<td>' + esc(t.accountId || '—') + '</td><td>' + esc(t.school?.name || 'Unassigned') + '</td>' +
       '<td>' + esc([t.department, t.major].filter(Boolean).join(' · ') || '—') + '</td>' +
       '<td>' + (t.active ? '<span class="pill green">Active</span>' : '<span class="pill gray">Inactive</span>') + '</td><td>' + n(t.courseCount) + '</td><td>' +
-      (t.active ? '<div class="row wrap"><button type="button" class="btn btn-soft btn-sm" data-admin-action="password" data-id="' + esc(t.id) + '" data-role="teacher">Reset Password</button>' +
+      (t.active ? '<div class="row wrap"><button type="button" class="btn btn-light btn-sm" data-admin-action="assign-dept" data-id="' + esc(t.id) + '" data-role="teacher">Assign Dept</button><button type="button" class="btn btn-soft btn-sm" data-admin-action="password" data-id="' + esc(t.id) + '" data-role="teacher">Reset Password</button>' +
       '<button type="button" class="btn btn-danger btn-sm" data-admin-action="remove-teacher" data-id="' + esc(t.id) + '">Deactivate</button></div>' : '—') + '</td></tr>').join('');
-    return pendingSection + importSection + '<section class="panel panel-pad" style="margin-bottom:20px"><h2>Add an Instructor</h2><p class="small muted">Create a separate login for each instructor.</p>' +
+    return pendingSection + departmentPanel() + importSection + '<section class="panel panel-pad" style="margin-bottom:20px"><h2>Add an Instructor</h2><p class="small muted">Create a separate login for each instructor.</p>' +
       '<form id="admin-add-teacher"><div class="form-grid"><div class="field"><label for="admin-teacher-name">Name</label><input id="admin-teacher-name" name="name" required maxlength="60"></div>' +
       '<div class="field"><label for="admin-teacher-email">Email</label><input id="admin-teacher-email" name="email" type="email" placeholder="teacher@example.com" required></div>' +
       '<div class="field"><label for="admin-teacher-password">Temporary Password</label><input id="admin-teacher-password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></div></div>' +
@@ -160,7 +196,7 @@
       '<div class="row wrap"><select data-admin-filter="student-department" aria-label="Filter by department"><option value="">All Departments</option>' + depts.map(d => '<option value="' + esc(d) + '"' + (studentFilter.department === d ? ' selected' : '') + '>' + esc(d) + '</option>').join('') + '</select>' +
       '<select data-admin-filter="student-major" aria-label="Filter by major"><option value="">All Majors</option>' + majors.map(m => '<option value="' + esc(m) + '"' + (studentFilter.major === m ? ' selected' : '') + '>' + esc(m) + '</option>').join('') + '</select>' +
       '<select data-admin-filter="student-gender" aria-label="Filter by gender"><option value="">All Genders</option>' + genders.map(g => '<option value="' + esc(g) + '"' + (studentFilter.gender === g ? ' selected' : '') + '>' + esc(g) + '</option>').join('') + '</select></div></div>';
-    if (!allStudents.length) return importSection + em('No students yet', 'Students will appear here after registering or importing.');
+    if (!allStudents.length) return departmentPanel() + importSection + em('No students yet', 'Students will appear here after registering or importing.');
     const cards = students.length ? students.map(s => {
       const enrolled = new Set((s.enrollments || []).map(e => e.courseId));
       const list = (s.enrollments || []).map(e => '<div class="student-detail-row"><span><strong>' + esc(e.courseTitle) + '</strong> · ' + esc(e.teacherName || 'Instructor') + '</span>' +
@@ -171,13 +207,27 @@
         '</select><button class="btn btn-soft btn-sm" type="submit">Add to Course</button></div></form>' : '<p class="small muted">Enrolled in every available course.</p>';
       const metaParts = [s.email, 'Student ID ' + (s.studentId || 'N/A'), s.gender, [s.department, s.major].filter(Boolean).join(' · '), s.school?.name || 'Unassigned'].filter(Boolean);
       return '<section class="panel panel-pad" style="margin-bottom:16px"><div class="row-between"><div><h2 style="margin:0 0 5px">' + esc(s.name) + '</h2><p class="small muted" style="margin:0">' +
-        esc(metaParts.join(' · ')) + '</p></div><button class="btn btn-soft btn-sm" type="button" data-admin-action="password" data-id="' + esc(s.id) +
-        '" data-role="student">Reset Password</button></div><div class="student-detail">' + (list || '<p class="small muted">No enrolled courses.</p>') + '</div>' +
+        esc(metaParts.join(' · ')) + '</p></div><div class="row wrap"><button class="btn btn-light btn-sm" type="button" data-admin-action="assign-dept" data-id="' + esc(s.id) +
+        '" data-role="student">Assign Dept</button><button class="btn btn-soft btn-sm" type="button" data-admin-action="password" data-id="' + esc(s.id) +
+        '" data-role="student">Reset Password</button></div></div><div class="student-detail">' + (list || '<p class="small muted">No enrolled courses.</p>') + '</div>' +
         '<div style="margin-top:16px"><strong class="small">Adjust Course Enrollment</strong>' + addForm + '</div></section>';
     }).join('') : em('No matching students', 'Try adjusting your search or filter criteria.');
-    return importSection + filterBar + cards;
+    return departmentPanel() + importSection + filterBar + cards;
   }
 
+  function deptDialog() {
+    if (!deptDialogUser) return '';
+    const depts = (adminData?.departments || []).map(d => d.name);
+    return '<div class="modal-backdrop" data-admin-action="close-dept-dialog"><div class="modal"><div class="modal-head"><h2>Assign Department & Major</h2>' +
+      '<button class="icon-btn" type="button" data-admin-action="close-dept-dialog" aria-label="Close">✕</button></div>' +
+      '<form id="admin-dept-form" data-id="' + esc(deptDialogUser.id) + '"><div class="modal-body">' +
+      '<p class="small muted">Update department and major for <strong>' + esc(deptDialogUser.name) + '</strong>.</p>' +
+      '<div class="field"><label for="admin-user-dept">Department (院系)</label><input id="admin-user-dept" name="department" list="admin-dept-datalist" value="' + esc(deptDialogUser.department || '') + '" maxlength="80" placeholder="Select or type a department">' +
+      '<datalist id="admin-dept-datalist">' + depts.map(d => '<option value="' + esc(d) + '">').join('') + '</datalist></div>' +
+      '<div class="field"><label for="admin-user-major">Major (专业)</label><input id="admin-user-major" name="major" value="' + esc(deptDialogUser.major || '') + '" maxlength="80" placeholder="Enter major (optional)"></div>' +
+      '</div><div class="modal-actions"><button class="btn btn-light" type="button" data-admin-action="close-dept-dialog">Cancel</button>' +
+      '<button class="btn btn-primary" type="submit">Save Assignment</button></div></form></div></div>';
+  }
   function passwordDialog() {
     if (!adminDialog) return '';
     return '<div class="modal-backdrop" data-admin-action="close-dialog"><div class="modal"><div class="modal-head"><h2>Reset ' + esc(adminDialog.role) +
@@ -198,19 +248,20 @@
     const body = adminError
       ? '<section class="panel panel-pad"><p class="form-error">' + esc(adminError) + '</p><button class="btn btn-soft" data-admin-action="reload">Retry</button></section>'
       : !adminData ? '<section class="panel panel-pad">Loading administrator records…</section>'
-      : '<div class="page-head"><div><div class="eyebrow">' + scopeLabel + '</div><h1>' + (adminTab === 'teachers' ? 'Instructor Accounts' : 'Student Accounts') +
+      : '<div class="page-head"><div><div class="eyebrow">' + scopeLabel + '</div><h1>' + (adminTab === 'teachers' ? 'Instructor Accounts' : adminTab === 'students' ? 'Student Accounts' : 'Information Announcements') +
         '</h1><p>Manage user access and student course enrollment.</p></div></div>' + organizationPanel + '<div class="stats-grid" style="margin-bottom:24px">' +
         stat('Instructors', n(s.teachers), 'Registered instructor accounts', '♧') + stat('Students', n(s.students), 'Registered student accounts', '▣') +
-        stat('Courses', n(s.courses), 'Courses across instructors', '▤') + '</div>' + (adminTab === 'teachers' ? instructorTable() : studentTable());
+        stat('Courses', n(s.courses), 'Courses across instructors', '▤') + stat('Announcements', n(s.announcements), 'Published school notices', '◈') + '</div>' + (adminTab === 'teachers' ? instructorTable() : adminTab === 'students' ? studentTable() : announcementsTable());
     return '<div class="mobile-overlay ' + (state.mobileOpen ? 'show' : '') + '" data-admin-action="close-menu"></div><div class="app-shell"><aside class="sidebar ' +
       (state.mobileOpen ? 'open' : '') + '">' + brand() + '<div class="sidebar-label">' + scopeLabel + '</div><nav class="nav-list" aria-label="Administrator Menu">' +
       '<button type="button" class="nav-btn ' + (adminTab === 'teachers' ? 'active' : '') + '" data-admin-action="tab" data-tab="teachers"><span class="ico">♧</span>Instructors' + ((adminData?.pendingTeachers?.length || 0) ? '<span class="nav-count">' + adminData.pendingTeachers.length + '</span>' : '') + '</button>' +
-      '<button type="button" class="nav-btn ' + (adminTab === 'students' ? 'active' : '') + '" data-admin-action="tab" data-tab="students"><span class="ico">▣</span>Students</button></nav>' +
+      '<button type="button" class="nav-btn ' + (adminTab === 'students' ? 'active' : '') + '" data-admin-action="tab" data-tab="students"><span class="ico">▣</span>Students</button>' +
+      '<button type="button" class="nav-btn ' + (adminTab === 'announcements' ? 'active' : '') + '" data-admin-action="tab" data-tab="announcements"><span class="ico">◈</span>Announcements</button></nav>' +
       '<div class="sidebar-bottom"><div class="side-user"><span class="avatar sm">' + initials(state.user?.name) + '</span><span class="side-user-text"><strong>' + esc(state.user?.name) +
       '</strong><small>' + (organization ? 'School Administrator' : 'Site Administrator') + '</small></span><button class="icon-btn" type="button" data-admin-action="logout" aria-label="Sign Out" title="Sign Out">↪</button></div></div></aside>' +
       '<div class="main-area"><header class="topbar"><div class="row"><button class="mobile-menu" type="button" data-admin-action="toggle-menu" aria-label="Open Menu">☰</button>' +
       '<div class="breadcrumbs">Zhixing Learning / <b>Administration</b></div></div><span class="role-chip">' + (organization ? 'School Administrator' : 'Site Administrator') + '</span></header><main class="content">' + body +
-      '<footer class="site-footer">Zhixing Learning · Site Administration</footer></main></div></div>' + passwordDialog();
+      '<footer class="site-footer">Zhixing Learning · Site Administration</footer></main></div></div>' + passwordDialog() + deptDialog();
   }
 
   render = function() {
@@ -235,7 +286,7 @@
     const button = event.target.closest('[data-admin-action]');
     if (!button) return;
     const action = button.dataset.adminAction;
-    if (action === 'close-dialog' && button.classList.contains('modal-backdrop') && event.target !== button) return;
+    if ((action === 'close-dialog' || action === 'close-dept-dialog') && button.classList.contains('modal-backdrop') && event.target !== button) return;
     event.preventDefault();
     if (action === 'forgot') {
       state.authMode = 'forgot'; state.authError = ''; resetNotice = ''; render(); return;
@@ -247,6 +298,29 @@
     if (action === 'toggle-menu') { state.mobileOpen = !state.mobileOpen; render(); return; }
     if (action === 'close-menu') { state.mobileOpen = false; render(); return; }
     if (action === 'close-dialog') { adminDialog = null; render(); return; }
+    if (action === 'close-dept-dialog') { deptDialogUser = null; render(); return; }
+    if (action === 'assign-dept') {
+      const source = (button.dataset.role === 'teacher' ? adminData?.teachers : adminData?.students) || [];
+      const person = source.find(item => item.id === button.dataset.id);
+      if (person) { deptDialogUser = person; render(); }
+      return;
+    }
+    if (action === 'delete-dept') {
+      if (!confirm('Remove this department from the list?')) return;
+      run(async () => { await api('/api/admin/departments/' + encodeURIComponent(button.dataset.id), {method:'DELETE'}); adminData = await api('/api/admin/overview'); render(); showToast('Department removed'); }, 'Could not remove department: ');
+      return;
+    }
+    if (action === 'edit-ann') {
+      annEditItem = (adminData?.announcements || []).find(a => a.id === button.dataset.id) || null;
+      render();
+      return;
+    }
+    if (action === 'cancel-edit-ann') { annEditItem = null; render(); return; }
+    if (action === 'delete-ann') {
+      if (!confirm('Delete this announcement?')) return;
+      run(async () => { await api('/api/admin/announcements/' + encodeURIComponent(button.dataset.id), {method:'DELETE'}); if (annEditItem?.id === button.dataset.id) annEditItem = null; adminData = await api('/api/admin/overview'); render(); showToast('Announcement deleted'); }, 'Could not delete announcement: ');
+      return;
+    }
     if (action === 'reload') { adminError = ''; adminData = null; render(); return; }
     if (action === 'logout') {
       run(async () => { await api('/api/auth/logout', {method:'POST'}); state.user = null; state.authRole = 'student'; state.authMode = 'login'; adminData = null; adminDialog = null; render(); showToast('You have signed out'); });
@@ -305,7 +379,7 @@
 
   document.addEventListener('submit', event => {
     const form = event.target;
-    if (!['admin-reset-request','admin-reset-confirm','admin-add-teacher','admin-password-form','admin-import-student-form','admin-import-teacher-form'].includes(form.id) && !form.classList.contains('admin-enrollment-form')) return;
+    if (!['admin-reset-request','admin-reset-confirm','admin-add-teacher','admin-password-form','admin-import-student-form','admin-import-teacher-form','admin-add-dept-form','admin-dept-form','admin-announcement-form'].includes(form.id) && !form.classList.contains('admin-enrollment-form')) return;
     event.preventDefault();
     const values = Object.fromEntries(new FormData(form));
     if (form.id === 'admin-reset-request') {
@@ -340,6 +414,34 @@
         render();
         showToast('Imported ' + n(result.importedCount) + ' ' + role + ' account(s)');
       }, 'Import failed: ');
+      return;
+    }
+    if (form.id === 'admin-add-dept-form') {
+      run(async () => {
+        await api('/api/admin/departments', { method: 'POST', body: JSON.stringify({ name: values.name }) });
+        adminData = await api('/api/admin/overview'); render(); showToast('Department added');
+      }, 'Could not add department: ');
+      return;
+    }
+    if (form.id === 'admin-dept-form') {
+      run(async () => {
+        await api('/api/admin/users/' + encodeURIComponent(form.dataset.id) + '/department', { method: 'PATCH', body: JSON.stringify({ department: values.department, major: values.major }) });
+        deptDialogUser = null;
+        adminData = await api('/api/admin/overview'); render(); showToast('Department assignment updated');
+      }, 'Could not update department: ');
+      return;
+    }
+    if (form.id === 'admin-announcement-form') {
+      const editId = form.dataset.id;
+      run(async () => {
+        if (editId) {
+          await api('/api/admin/announcements/' + encodeURIComponent(editId), { method: 'PATCH', body: JSON.stringify({ category: values.category, title: values.title, content: values.content }) });
+        } else {
+          await api('/api/admin/announcements', { method: 'POST', body: JSON.stringify({ category: values.category, title: values.title, content: values.content }) });
+        }
+        annEditItem = null;
+        adminData = await api('/api/admin/overview'); render(); showToast(editId ? 'Announcement updated' : 'Announcement published');
+      }, 'Could not save announcement: ');
       return;
     }
     if (form.id === 'admin-add-teacher') {

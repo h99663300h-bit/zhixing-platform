@@ -105,15 +105,19 @@ function ensureSeed() {
 let db = ensureSeed();
 let migrated = false;
 if (!Array.isArray(db.schools)) { db.schools = []; migrated = true; }
-for (const key of ['assignments', 'submissions', 'grades']) if (!Array.isArray(db[key])) { db[key] = []; migrated = true; }
+for (const key of ['assignments', 'submissions', 'grades', 'departments', 'announcements']) if (!Array.isArray(db[key])) { db[key] = []; migrated = true; }
 for (const user of db.users) {
   if (typeof user.gender !== 'string') { user.gender = ''; migrated = true; }
   if (typeof user.grade !== 'string') { user.grade = ''; migrated = true; }
+  if (typeof user.department !== 'string') { user.department = ''; migrated = true; }
+  if (typeof user.major !== 'string') { user.major = ''; migrated = true; }
+  if (!user.accountId && user.studentId) { user.accountId = user.studentId; migrated = true; }
   if (user.role === 'admin' && !user.schoolId && !user.adminScope) { user.adminScope = 'global'; migrated = true; }
 }
 for (const course of db.courses) {
   if (!course.enrollmentCode) { course.enrollmentCode = newEnrollmentCode(db.courses); migrated = true; }
   if (!course.gradeWeights) { course.gradeWeights = { ...DEFAULT_WEIGHTS }; migrated = true; }
+  if (!Array.isArray(course.announcements)) { course.announcements = []; migrated = true; }
 }
 // An administrator exists only if deployment credentials are explicitly provided.
 if (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD && !db.users.some(u => u.role === 'admin')) {
@@ -201,7 +205,8 @@ function serializeCourse(course, user) {
       ? { ...lesson, videoFile: undefined, videoFileUrl: lesson.videoFile ? '/api/lessons/' + lesson.id + '/video' : '' }
       : { ...lesson, content: '', videoUrl: '', videoFile: undefined, videoFileUrl: '' });
   const { enrollmentCode, ...publicCourse } = course;
-  return { ...publicCourse, ...(user?.role === 'teacher' && course.teacherId === user.id ? { enrollmentCode } : {}), teacherName: teacher?.name || 'Instructor', lessons, ...p,
+  const announcements = canSeeLessonContent ? (course.announcements || []).slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))) : [];
+  return { ...publicCourse, ...(user?.role === 'teacher' && course.teacherId === user.id ? { enrollmentCode } : {}), teacherName: teacher?.name || 'Instructor', lessons, announcements, ...p,
     studentCount: db.enrollments.filter(e => e.courseId === course.id).length, quizAvailable: Boolean(quizByCourse(course.id)?.questions.length) };
 }
 function recentActivity(kind, userId, courseId, detail) {
@@ -795,7 +800,95 @@ async function api(req, res, url) {
     const pendingTeachers = db.users
       .filter(u => u.role === 'teacher' && u.active !== false && u.pendingSchoolId && (isGlobalAdmin(user) || u.pendingSchoolId === user.schoolId))
       .map(t => ({ ...publicUser(t), requestedAt: t.pendingSchoolRequestedAt || t.createdAt }));
-    return json(res, 200, { organization: organization ? { id: organization.id, name: organization.name, code: organization.code } : null, organizations, teachers: teachers.map(t => ({ ...publicUser(t), courseCount: db.courses.filter(c => c.teacherId === t.id).length })), pendingTeachers, students, courses, stats: { teachers: teachers.length, students: students.length, courses: courses.length, pendingTeachers: pendingTeachers.length } });
+    const deptMap = new Map();
+    for (const d of db.departments) {
+      if (isGlobalAdmin(user) || d.schoolId === user.schoolId) deptMap.set(d.name, d);
+    }
+    for (const u of [...teachers, ...students]) {
+      if (u.department && !deptMap.has(u.department)) {
+        deptMap.set(u.department, { id: null, schoolId: u.schoolId || null, name: u.department, derived: true });
+      }
+    }
+    const departments = [...deptMap.values()].sort((a, b) => a.name.localeCompare(b.name));
+    const announcements = db.announcements
+      .filter(a => isGlobalAdmin(user) || !a.schoolId || a.schoolId === user.schoolId)
+      .slice()
+      .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)));
+    return json(res, 200, { organization: organization ? { id: organization.id, name: organization.name, code: organization.code } : null, organizations, departments, announcements, teachers: teachers.map(t => ({ ...publicUser(t), courseCount: db.courses.filter(c => c.teacherId === t.id).length })), pendingTeachers, students, courses, stats: { teachers: teachers.length, students: students.length, courses: courses.length, pendingTeachers: pendingTeachers.length, announcements: announcements.length } });
+  }
+  if (pathname === '/api/announcements' && method === 'GET') {
+    requireUser(user);
+    const list = db.announcements
+      .filter(a => isGlobalAdmin(user) || !a.schoolId || a.schoolId === user.schoolId)
+      .slice()
+      .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)));
+    return json(res, 200, { announcements: list });
+  }
+  if (pathname === '/api/admin/announcements' && method === 'POST') {
+    requireAdmin(user);
+    const category = ['school', 'college', 'academic'].includes(body.category) ? body.category : fail(400, 'Announcement category must be school, college, or academic');
+    const title = safeText(body.title, 'Announcement title', 120);
+    const content = safeText(body.content, 'Announcement content', 5000);
+    const announcement = {
+      id: id('ann'),
+      schoolId: isGlobalAdmin(user) ? (body.schoolId || null) : user.schoolId,
+      category, title, content,
+      authorId: user.id, authorName: user.name,
+      createdAt: now(), updatedAt: now(),
+    };
+    db.announcements.push(announcement); save();
+    return json(res, 201, { announcement });
+  }
+  let annMatch = pathname.match(/^\/api\/admin\/announcements\/([^/]+)$/);
+  if (annMatch && method === 'PATCH') {
+    requireAdmin(user);
+    const ann = db.announcements.find(a => a.id === annMatch[1]);
+    if (!ann || (!isGlobalAdmin(user) && ann.schoolId !== user.schoolId)) fail(404, 'Announcement not found');
+    if (body.category !== undefined) {
+      if (!['school', 'college', 'academic'].includes(body.category)) fail(400, 'Announcement category must be school, college, or academic');
+      ann.category = body.category;
+    }
+    if (body.title !== undefined) ann.title = safeText(body.title, 'Announcement title', 120);
+    if (body.content !== undefined) ann.content = safeText(body.content, 'Announcement content', 5000);
+    ann.updatedAt = now();
+    save();
+    return json(res, 200, { announcement: ann });
+  }
+  if (annMatch && method === 'DELETE') {
+    requireAdmin(user);
+    const idx = db.announcements.findIndex(a => a.id === annMatch[1]);
+    if (idx < 0 || (!isGlobalAdmin(user) && db.announcements[idx].schoolId !== user.schoolId)) fail(404, 'Announcement not found');
+    db.announcements.splice(idx, 1); save();
+    return json(res, 200, { ok: true });
+  }
+  if (pathname === '/api/admin/departments' && method === 'POST') {
+    requireAdmin(user);
+    const name = safeText(body.name, 'Department name', 80);
+    const schoolId = isGlobalAdmin(user) ? (body.schoolId || null) : user.schoolId;
+    if (db.departments.some(d => d.schoolId === schoolId && d.name.toLowerCase() === name.toLowerCase())) {
+      fail(409, 'This department already exists');
+    }
+    const department = { id: id('dept'), schoolId, name, createdAt: now() };
+    db.departments.push(department); save();
+    return json(res, 201, { department });
+  }
+  let deptMatch = pathname.match(/^\/api\/admin\/departments\/([^/]+)$/);
+  if (deptMatch && method === 'DELETE') {
+    requireAdmin(user);
+    const idx = db.departments.findIndex(d => d.id === deptMatch[1]);
+    if (idx < 0 || (!isGlobalAdmin(user) && db.departments[idx].schoolId !== user.schoolId)) fail(404, 'Department not found');
+    db.departments.splice(idx, 1); save();
+    return json(res, 200, { ok: true });
+  }
+  let userDeptMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/department$/);
+  if (userDeptMatch && method === 'PATCH') {
+    requireAdmin(user);
+    const target = db.users.find(u => u.id === userDeptMatch[1] && ['teacher', 'student'].includes(u.role));
+    if (!target || !canAdminManage(user, target)) fail(404, 'Account not found');
+    if (body.department !== undefined) target.department = safeText(body.department ?? '', 'Department', 80, false);
+    if (body.major !== undefined) target.major = safeText(body.major ?? '', 'Major', 80, false);
+    save();
+    return json(res, 200, { user: publicUser(target) });
   }
   let reqMatch = pathname.match(/^\/api\/admin\/teacher-requests\/([^/]+)\/(approve|reject)$/);
   if (reqMatch && method === 'POST') {
@@ -1171,6 +1264,29 @@ async function api(req, res, url) {
     const attempt = { id: id('attempt'), quizId: quiz.id, courseId: course.id, userId: user.id, score, total: quiz.questions.length, percent: Math.round(score / quiz.questions.length * 100), submittedAt: now() };
     db.attempts.push(attempt); enrollment(user.id, course.id).lastActiveAt = now(); recentActivity('quiz_submitted', user.id, course.id, `${attempt.percent}%`); save();
     return json(res, 201, { attempt: { id: attempt.id, score, total: attempt.total, percent: attempt.percent, submittedAt: attempt.submittedAt } });
+  }
+  match = pathname.match(/^\/api\/courses\/([^/]+)\/announcements$/);
+  if (match && method === 'POST') {
+    const course = ownedCourse(user, courseById(match[1]));
+    const title = safeText(body.title, 'Announcement title', 120);
+    const content = safeText(body.content, 'Announcement content', 5000);
+    if (!Array.isArray(course.announcements)) course.announcements = [];
+    const announcement = { id: id('cann'), title, content, authorId: user.id, authorName: user.name, createdAt: now() };
+    course.announcements.unshift(announcement);
+    course.updatedAt = now();
+    save();
+    return json(res, 201, { announcement, course: serializeCourse(course, user) });
+  }
+  match = pathname.match(/^\/api\/courses\/([^/]+)\/announcements\/([^/]+)$/);
+  if (match && method === 'DELETE') {
+    const course = ownedCourse(user, courseById(match[1]));
+    if (!Array.isArray(course.announcements)) course.announcements = [];
+    const idx = course.announcements.findIndex(a => a.id === match[2]);
+    if (idx < 0) fail(404, 'Course announcement not found');
+    course.announcements.splice(idx, 1);
+    course.updatedAt = now();
+    save();
+    return json(res, 200, { ok: true });
   }
   match = pathname.match(/^\/api\/courses\/([^/]+)\/discussions$/);
   if (match) {
