@@ -2002,6 +2002,34 @@ async function api(req, res, url) {
     teacher.active = false; invalidateSessions(teacher.id); save();
     return json(res, 200, { ok: true });
   }
+  adminMatch = pathname.match(/^\/api\/admin\/teachers\/([^/]+)\/restore$/);
+  if (adminMatch && method === 'POST') {
+    requireAdmin(user);
+    const teacher = db.users.find(u => u.id === adminMatch[1] && u.role === 'teacher');
+    if (!teacher || !canAdminManage(user, teacher)) fail(404, 'Instructor account not found');
+    teacher.active = true; save();
+    return json(res, 200, { user: publicUser(teacher) });
+  }
+  adminMatch = pathname.match(/^\/api\/admin\/teachers\/([^/]+)\/permanent$/);
+  if (adminMatch && method === 'DELETE') {
+    requireAdmin(user);
+    const idx = db.users.findIndex(u => u.id === adminMatch[1] && u.role === 'teacher');
+    if (idx < 0 || !canAdminManage(user, db.users[idx])) fail(404, 'Instructor account not found');
+    const teacher = db.users[idx];
+    const soleCourses = db.courses.filter(c => c.teacherId === teacher.id && (!Array.isArray(c.teacherIds) || c.teacherIds.filter(id => id !== teacher.id).length === 0));
+    if (soleCourses.length) fail(409, 'This instructor still owns ' + soleCourses.length + ' course(s). Reassign or delete those courses first.');
+    for (const c of db.courses) {
+      if (Array.isArray(c.teacherIds)) {
+        c.teacherIds = c.teacherIds.filter(id => id !== teacher.id);
+        if (c.teacherId === teacher.id && c.teacherIds.length) c.teacherId = c.teacherIds[0];
+      }
+    }
+    invalidateSessions(teacher.id);
+    removeUpload(teacher.avatarFile);
+    db.users.splice(idx, 1);
+    save();
+    return json(res, 200, { ok: true });
+  }
   adminMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/password$/);
   if (adminMatch && method === 'PATCH') {
     requireAdmin(user);

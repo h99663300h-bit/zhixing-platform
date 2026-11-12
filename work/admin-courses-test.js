@@ -80,6 +80,13 @@ async function main() {
   assert.equal((await api('DELETE', `/api/admin/courses/${courseId}`, undefined, 'admin')).status, 200);
   assert.equal((await api('GET', '/api/admin/overview', undefined, 'admin')).data.courses.length, 0);
 
+  // Deactivate, restore, and permanently delete a resigned instructor
+  assert.equal((await api('DELETE', `/api/admin/teachers/${t2.id}`, undefined, 'admin')).status, 200);
+  assert.equal((await api('POST', `/api/admin/teachers/${t2.id}/restore`, undefined, 'admin')).status, 200);
+  assert.equal((await api('DELETE', `/api/admin/teachers/${t2.id}`, undefined, 'admin')).status, 200);
+  assert.equal((await api('DELETE', `/api/admin/teachers/${t2.id}/permanent`, undefined, 'admin')).status, 200);
+  assert.ok(!(await api('GET', '/api/admin/overview', undefined, 'admin')).data.teachers.some(t => t.id === t2.id));
+
   console.log('PASS: admin course management, multi-teacher assignment, department metadata, and enrollment count');
 }
 

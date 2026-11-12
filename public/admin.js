@@ -232,7 +232,7 @@
       '<td>' + esc([t.department, t.major].filter(Boolean).join(' · ') || '—') + '</td>' +
       '<td>' + (t.active ? '<span class="pill green">Active</span>' : '<span class="pill gray">Inactive</span>') + '</td><td>' + n(t.courseCount) + '</td><td>' +
       (t.active ? '<div class="row wrap"><button type="button" class="btn btn-light btn-sm" data-admin-action="assign-dept" data-id="' + esc(t.id) + '" data-role="teacher">Assign Dept</button><button type="button" class="btn btn-soft btn-sm" data-admin-action="password" data-id="' + esc(t.id) + '" data-role="teacher">Reset Password</button>' +
-      '<button type="button" class="btn btn-danger btn-sm" data-admin-action="remove-teacher" data-id="' + esc(t.id) + '">Deactivate</button></div>' : '—') + '</td></tr>').join('');
+      '<button type="button" class="btn btn-danger btn-sm" data-admin-action="remove-teacher" data-id="' + esc(t.id) + '">Deactivate</button></div>' : '<div class="row wrap"><button type="button" class="btn btn-soft btn-sm" data-admin-action="restore-teacher" data-id="' + esc(t.id) + '">Restore</button><button type="button" class="btn btn-danger btn-sm" data-admin-action="delete-teacher-permanent" data-id="' + esc(t.id) + '">Delete</button></div>') + '</td></tr>').join('');
     return pendingSection + departmentPanel() + importSection + '<section class="panel panel-pad" style="margin-bottom:20px"><h2>Add an Instructor</h2><p class="small muted">Create a separate login for each instructor.</p>' +
       '<form id="admin-add-teacher"><div class="form-grid"><div class="field"><label for="admin-teacher-name">Name</label><input id="admin-teacher-name" name="name" required maxlength="60"></div>' +
       '<div class="field"><label for="admin-teacher-email">Email</label><input id="admin-teacher-email" name="email" type="email" placeholder="teacher@example.com" required></div>' +
@@ -450,6 +450,16 @@
         render();
         showToast(verb === 'approve' ? 'Instructor approved and linked to school' : 'Request declined');
       }, 'Could not update request: ');
+      return;
+    }
+    if (action === 'restore-teacher') {
+      run(async () => { await api('/api/admin/teachers/' + encodeURIComponent(button.dataset.id) + '/restore', { method: 'POST' }); adminData = await api('/api/admin/overview'); render(); showToast('Instructor account restored'); }, 'Could not restore instructor: ');
+      return;
+    }
+    if (action === 'delete-teacher-permanent') {
+      const teacher = (adminData?.teachers || []).find(t => t.id === button.dataset.id);
+      if (!teacher || !confirm('Permanently delete ' + teacher.name + '? This will remove the account and release its account ID/email.')) return;
+      run(async () => { await api('/api/admin/teachers/' + encodeURIComponent(teacher.id) + '/permanent', { method: 'DELETE' }); adminData = await api('/api/admin/overview'); render(); showToast('Instructor account permanently deleted'); }, 'Could not delete instructor: ');
       return;
     }
     if (action === 'remove-teacher') {
