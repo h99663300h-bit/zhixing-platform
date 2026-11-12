@@ -41,6 +41,8 @@ function emptyScope() {
     combinedGroups: [],
     placement: { students: [], config: { classCount: 4, classPrefix: '新生', mode: 'total', genderBalance: true }, result: null },
     exams: [],
+    teacherGroups: [],
+    groupBlocks: [],
   };
 }
 
@@ -53,7 +55,7 @@ function ensureScope(db, scopeKey) {
   if (!Array.isArray(s.settings.blockedSlots)) s.settings.blockedSlots = [];
   if (!s.placement || typeof s.placement !== 'object') s.placement = { students: [], config: { classCount: 4, classPrefix: '新生', mode: 'total', genderBalance: true }, result: null };
   if (!Array.isArray(s.placement.students)) s.placement.students = [];
-  for (const k of ['grades', 'classes', 'subjects', 'rooms', 'plans', 'entries', 'swapRequests', 'auditLogs', 'archives', 'combinedGroups', 'exams']) {
+  for (const k of ['grades', 'classes', 'subjects', 'rooms', 'plans', 'entries', 'swapRequests', 'auditLogs', 'archives', 'combinedGroups', 'exams', 'teacherGroups', 'groupBlocks']) {
     if (!Array.isArray(s[k])) s[k] = [];
   }
   if (!s.teacherRules || typeof s.teacherRules !== 'object') s.teacherRules = {};
@@ -114,6 +116,14 @@ function checkPlacement(scope, candidate, ignoreEntryIds = new Set()) {
   }
   if (Array.isArray(tr.blockedSlots) && tr.blockedSlots.includes(key)) {
     hard.push({ code: 'H06', message: '该教师在该时段设置了固定不可排时间' });
+  }
+  for (const gb of (scope.groupBlocks || [])) {
+    if (gb.active === false) continue;
+    if (Number(gb.day) !== day || !Array.isArray(gb.periodIds) || !gb.periodIds.includes(candidate.periodId)) continue;
+    const grp = (scope.teacherGroups || []).find(g => g.id === gb.groupId);
+    if (grp && Array.isArray(grp.teacherIds) && grp.teacherIds.includes(candidate.teacherId)) {
+      hard.push({ code: 'H06', message: `与「${grp.name}」${gb.label || gb.activityType || '教研活动'}时间冲突` });
+    }
   }
   if (Array.isArray(tr.availableSlots) && tr.availableSlots.length && !tr.availableSlots.includes(key)) {
     hard.push({ code: 'H06', message: '该时段不在教师设定的固定可排时间内' });

@@ -127,8 +127,17 @@
           return '<td style="background:#f3f4f6;color:#9ca3af;text-align:center;font-size:12px">全校锁定</td>';
         }
         const cellEntries = entries.filter(e => Number(e.day) === d.day && e.periodId === p.id);
-        const content = cellEntries.length
-          ? cellEntries.map(e => renderCellCard(e, scope, teachers, conflictSet)).join('')
+        const groupActs = filterType === 'teacher' && targetId ? (scope.groupBlocks || []).filter(gb => {
+          if (gb.active === false || Number(gb.day) !== d.day || !(gb.periodIds || []).includes(p.id)) return false;
+          const grp = (scope.teacherGroups || []).find(g => g.id === gb.groupId);
+          return grp && (grp.teacherIds || []).includes(targetId);
+        }) : [];
+        const actBadges = groupActs.map(gb => {
+          const grpName = (scope.teacherGroups || []).find(g => g.id === gb.groupId)?.name || '';
+          return '<div style="padding:5px 7px;border-radius:6px;background:' + esc(gb.color || '#fef3c7') + ';font-size:12px;margin-bottom:4px"><strong>' + esc(gb.icon || '🔔') + ' ' + esc(gb.label || gb.activityType) + '</strong><div class="tiny muted">' + esc(grpName) + '</div></div>';
+        }).join('');
+        const content = (cellEntries.length || actBadges)
+          ? actBadges + cellEntries.map(e => renderCellCard(e, scope, teachers, conflictSet)).join('')
           : '<div class="tiny muted" style="text-align:center;padding:8px 0">' + (filterType === 'teacher' ? '无课' : '<button type="button" class="btn-text" style="font-size:11px" data-sched-action="open-add-slot" data-day="' + d.day + '" data-period="' + esc(p.id) + '">+ 排课</button>') + '</div>';
         return '<td data-sched-drop="1" data-day="' + d.day + '" data-period="' + esc(p.id) + '" style="vertical-align:top;min-width:130px">' + content + '</td>';
       }).join('');
@@ -354,7 +363,29 @@
           return '<td style="text-align:center"><input type="checkbox" name="blockedSlots" value="' + k + '"' + checked + '></td>';
         }).join('') + '</tr>').join('') +
         '</tbody></table></div><button type="submit" class="btn btn-primary btn-sm" style="margin-top:10px">保存教师时间规则</button></form>' : '') +
-      '</section>';
+      '</section>' +
+      '<section class="panel panel-pad" style="margin-top:16px"><h3>7. 教师组固定无课时间（教研活动 / 集体会议）</h3>' +
+      '<p class="small muted">按教研组/部门批量预留活动时段，智能排课与手动调课自动避让。</p>' +
+      '<form id="sched-teacher-group-form" style="margin-bottom:14px"><div class="form-grid">' +
+      '<div class="field"><label>教师组名称 *</label><input name="name" placeholder="如 语文教研组 / 行政组" required></div>' +
+      '<div class="field"><label>勾选组成员（支持一人多组）</label><div style="display:flex;flex-wrap:wrap;gap:8px;padding:8px;border:1px solid var(--border);border-radius:8px">' +
+      (teachers.length ? teachers.map(t => '<label style="font-size:12px;display:flex;align-items:center;gap:4px"><input type="checkbox" name="teacherIds" value="' + esc(t.id) + '"><span>' + esc(t.name) + '</span></label>').join('') : '<span class="tiny muted">暂无教师</span>') +
+      '</div></div></div><button type="submit" class="btn btn-soft btn-sm">+ 创建教师组</button></form>' +
+      '<div class="row wrap" style="gap:6px;margin-bottom:14px">' + (scope.teacherGroups || []).map(g => '<span class="pill blue">' + esc(g.name) + ' (' + (g.teacherIds?.length || 0) + '人) <button type="button" data-sched-action="del-tgroup" data-id="' + esc(g.id) + '" style="border:0;background:none;color:inherit;cursor:pointer">×</button></span>').join('') + '</div>' +
+      ((scope.teacherGroups || []).length ? '<form id="sched-group-block-form"><div class="form-grid">' +
+        '<div class="field"><label>目标教师组 *</label><select name="groupId" required>' + scope.teacherGroups.map(g => '<option value="' + esc(g.id) + '">' + esc(g.name) + '</option>').join('') + '</select></div>' +
+        '<div class="field"><label>周期</label><select name="cycle"><option value="weekly">每周</option><option value="odd">单周</option><option value="even">双周</option><option value="custom">指定周次</option></select></div>' +
+        '<div class="field"><label>星期</label><select name="day">' + days.map(dx => '<option value="' + dx.day + '">' + dx.label + '</option>').join('') + '</select></div>' +
+        '<div class="field"><label>活动类型</label><select name="activityType"><option value="教研活动">教研活动</option><option value="集体会议">集体会议</option><option value="部门培训">部门培训</option><option value="行政例会">行政例会</option></select></div>' +
+        '<div class="field"><label>自定义名称/标签</label><input name="label" placeholder="如 语文组教研"></div>' +
+        '<div class="field"><label>背景色 / 图标</label><div class="row"><input name="color" type="color" value="#fef3c7" style="width:52px;padding:2px"><input name="icon" value="🔔" maxlength="4" style="width:60px"></div></div></div>' +
+        '<div class="field"><label>选择节次（可多选）*</label><div class="row wrap" style="gap:10px">' + tPeriods.map(tp => '<label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" name="periodIds" value="' + esc(tp.id) + '"><span>' + esc(tp.name) + '</span></label>').join('') + '</div></div>' +
+        '<button type="submit" class="btn btn-primary btn-sm">+ 添加教师组固定无课时间</button></form>' : '') +
+      '<div style="margin-top:12px">' + ((scope.groupBlocks || []).map(gb => {
+        const grp = (scope.teacherGroups || []).find(g => g.id === gb.groupId);
+        return '<div class="student-detail-row"><span><span style="padding:2px 7px;border-radius:6px;background:' + esc(gb.color || '#fef3c7') + '">' + esc(gb.icon || '🔔') + ' ' + esc(gb.label) + '</span> · <strong>' + esc(grp?.name || '') + '</strong> · 周' + gb.day + ' (' + (gb.periodIds || []).join(',') + ') · ' + (gb.active === false ? '已暂停' : '生效中') + '</span>' +
+          '<div class="row"><button type="button" class="btn btn-light btn-sm" data-sched-action="toggle-gblock" data-id="' + esc(gb.id) + '">' + (gb.active === false ? '启用' : '暂停') + '</button><button type="button" class="btn btn-danger btn-sm" data-sched-action="del-gblock" data-id="' + esc(gb.id) + '">删除</button></div></div>';
+      }).join('') || '<p class="small muted">尚未设置教师组固定无课时间。</p>') + '</div></section>';
   }
 
   function renderApprovalsTab(d) {
@@ -579,7 +610,9 @@
       if (p.isBreak) return '<tr style="background:#f3f4f6"><td colspan="' + (days.length + 1) + '" style="text-align:center;color:#6b7280;font-size:12px;padding:6px"><strong>' + esc(p.name) + '</strong> (' + esc(p.startTime) + '–' + esc(p.endTime) + ')</td></tr>';
       const cells = days.map(day => {
         const list = d.entries.filter(e => Number(e.day) === day.day && e.periodId === p.id);
-        return '<td>' + (list.length ? list.map(e => '<div style="padding:6px;border-radius:8px;border:1px solid var(--border);background:#fff"><strong>' + esc(e.subjectName) + '</strong><div class="tiny muted">' + esc(e.className) + (e.teacherName ? ' · ' + esc(e.teacherName) : '') + (e.roomName ? ' · ' + esc(e.roomName) : '') + '</div></div>').join('') : '<span class="tiny muted">' + (isTeacher ? '无课' : '—') + '</span>') + '</td>';
+        const acts = isTeacher ? (d.groupActivities || []).filter(gb => Number(gb.day) === day.day && (gb.periodIds || []).includes(p.id)) : [];
+        const actHtml = acts.map(gb => '<div style="padding:5px 7px;border-radius:6px;background:' + esc(gb.color || '#fef3c7') + ';font-size:12px;margin-bottom:4px"><strong>' + esc(gb.icon || '🔔') + ' ' + esc(gb.label || gb.activityType) + '</strong><div class="tiny muted">' + esc(gb.groupName || '') + '</div></div>').join('');
+        return '<td>' + ((list.length || actHtml) ? actHtml + list.map(e => '<div style="padding:6px;border-radius:8px;border:1px solid var(--border);background:#fff"><strong>' + esc(e.subjectName) + '</strong><div class="tiny muted">' + esc(e.className) + (e.teacherName ? ' · ' + esc(e.teacherName) : '') + (e.roomName ? ' · ' + esc(e.roomName) : '') + '</div></div>').join('') : '<span class="tiny muted">' + (isTeacher ? '无课' : '—') + '</span>') + '</td>';
       }).join('');
       return '<tr><td><strong>' + esc(p.name) + '</strong><br><span class="tiny muted">' + esc(p.startTime) + '–' + esc(p.endTime) + '</span></td>' + cells + '</tr>';
     }).join('');
@@ -674,6 +707,18 @@
       run(async () => { await api('/api/admin/schedule/exams/' + encodeURIComponent(btn.dataset.id) + '/auto', { method: 'POST', body: JSON.stringify({}) }); await refreshAdminSchedule(); showToast('已完成自动排监考'); }, '排监考失败: ');
       return;
     }
+    if (act === 'del-tgroup') {
+      run(async () => { await api('/api/admin/schedule/teacher-groups/' + encodeURIComponent(btn.dataset.id), { method: 'DELETE' }); await refreshAdminSchedule(); showToast('已删除教师组'); }, '操作失败: ');
+      return;
+    }
+    if (act === 'toggle-gblock') {
+      run(async () => { await api('/api/admin/schedule/group-blocks/' + encodeURIComponent(btn.dataset.id) + '/toggle', { method: 'PATCH', body: JSON.stringify({}) }); await refreshAdminSchedule(); showToast('状态已更新'); }, '操作失败: ');
+      return;
+    }
+    if (act === 'del-gblock') {
+      run(async () => { await api('/api/admin/schedule/group-blocks/' + encodeURIComponent(btn.dataset.id), { method: 'DELETE' }); await refreshAdminSchedule(); showToast('已删除'); }, '操作失败: ');
+      return;
+    }
     if (act === 'del-exam') {
       run(async () => { await api('/api/admin/schedule/exams/' + encodeURIComponent(btn.dataset.id), { method: 'DELETE' }); schedUI.selectedExamId = ''; await refreshAdminSchedule(); showToast('已删除考试计划'); }, '删除失败: ');
       return;
@@ -727,7 +772,7 @@
 
   document.addEventListener('submit', event => {
     const form = event.target;
-    const ids = ['sched-settings-form', 'sched-grade-form', 'sched-class-form', 'sched-subject-form', 'sched-room-form', 'sched-plan-form', 'sched-teacher-rule-form', 'sched-manual-entry-form', 'sched-force-form', 'teacher-swap-req-form', 'sched-combined-form', 'sched-placement-import-form', 'sched-placement-preview-form', 'sched-exam-create-form'];
+    const ids = ['sched-settings-form', 'sched-grade-form', 'sched-class-form', 'sched-subject-form', 'sched-room-form', 'sched-plan-form', 'sched-teacher-rule-form', 'sched-manual-entry-form', 'sched-force-form', 'teacher-swap-req-form', 'sched-combined-form', 'sched-placement-import-form', 'sched-placement-preview-form', 'sched-exam-create-form', 'sched-teacher-group-form', 'sched-group-block-form'];
     if (!ids.includes(form.id)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
@@ -789,6 +834,13 @@
         await refreshAdminSchedule();
         showToast('考试计划已创建');
       }, '创建失败: ');
+    } else if (form.id === 'sched-teacher-group-form') {
+      const teacherIds = [...form.querySelectorAll('input[name="teacherIds"]:checked')].map(x => x.value);
+      run(async () => { await api('/api/admin/schedule/teacher-groups', { method: 'POST', body: JSON.stringify({ name: values.name, teacherIds }) }); await refreshAdminSchedule(); showToast('教师组已创建'); }, '创建失败: ');
+    } else if (form.id === 'sched-group-block-form') {
+      const periodIds = [...form.querySelectorAll('input[name="periodIds"]:checked')].map(x => x.value);
+      if (!periodIds.length) { showToast('请至少选择一个节次', true); return; }
+      run(async () => { await api('/api/admin/schedule/group-blocks', { method: 'POST', body: JSON.stringify({ ...values, periodIds }) }); await refreshAdminSchedule(); showToast('已设置教师组固定无课时间'); }, '设置失败: ');
     } else if (form.id === 'teacher-swap-req-form') {
       run(async () => {
         await api('/api/teacher/schedule/requests', { method: 'POST', body: JSON.stringify(values) });

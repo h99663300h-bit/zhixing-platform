@@ -1406,6 +1406,85 @@ async function api(req, res, url) {
     res.end(rows.join('\r\n'));
     return;
   }
+  // --- Teacher Groups & Reserved Activity Blocks (教研活动/集体会议) ---
+  if (pathname === '/api/admin/schedule/teacher-groups' && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const grp = {
+      id: sched.id('tgrp'),
+      name: safeText(body.name, 'Group name', 60),
+      teacherIds: Array.isArray(body.teacherIds) ? [...new Set(body.teacherIds.map(String).filter(Boolean))] : [],
+    };
+    scope.teacherGroups.push(grp);
+    addAuditLog(scope, user, '创建教师组', `${grp.name} (${grp.teacherIds.length}人)`);
+    save();
+    return json(res, 201, { group: grp });
+  }
+  sMatch = pathname.match(/^\/api\/admin\/schedule\/teacher-groups\/([^/]+)$/);
+  if (sMatch && method === 'PUT') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const grp = scope.teacherGroups.find(g => g.id === sMatch[1]);
+    if (!grp) fail(404, 'Teacher group not found');
+    if (body.name !== undefined) grp.name = safeText(body.name, 'Group name', 60);
+    if (Array.isArray(body.teacherIds)) grp.teacherIds = [...new Set(body.teacherIds.map(String).filter(Boolean))];
+    addAuditLog(scope, user, '更新教师组成员', `${grp.name} (${grp.teacherIds.length}人)`);
+    save();
+    return json(res, 200, { group: grp });
+  }
+  if (sMatch && method === 'DELETE') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    scope.teacherGroups = scope.teacherGroups.filter(g => g.id !== sMatch[1]);
+    scope.groupBlocks = scope.groupBlocks.filter(b => b.groupId !== sMatch[1]);
+    save();
+    return json(res, 200, { ok: true });
+  }
+  if (pathname === '/api/admin/schedule/group-blocks' && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const grp = scope.teacherGroups.find(g => g.id === body.groupId);
+    if (!grp) fail(404, 'Teacher group not found');
+    const periodIds = Array.isArray(body.periodIds) ? [...new Set(body.periodIds.map(String).filter(Boolean))] : [];
+    if (!periodIds.length) fail(400, '请至少选择一个节次');
+    const block = {
+      id: sched.id('gblk'),
+      groupId: grp.id,
+      day: Math.max(1, Math.min(7, Number(body.day || 1))),
+      periodIds,
+      cycle: ['weekly', 'odd', 'even', 'custom'].includes(body.cycle) ? body.cycle : 'weekly',
+      customWeeks: safeText(body.customWeeks ?? '', 'Custom weeks', 40, false),
+      activityType: safeText(body.activityType || '教研活动', 'Activity type', 30),
+      label: safeText(body.label || body.activityType || '教研活动', 'Activity label', 40),
+      icon: safeText(body.icon || '🔔', 'Icon', 8, false),
+      color: /^#[0-9a-fA-F]{6}$/.test(body.color || '') ? body.color : '#fef3c7',
+      active: true,
+      createdAt: sched.now(),
+    };
+    scope.groupBlocks.push(block);
+    addAuditLog(scope, user, '设置教师组固定无课时间', `${grp.name} · 周${block.day} · ${block.label}`);
+    save();
+    return json(res, 201, { block });
+  }
+  sMatch = pathname.match(/^\/api\/admin\/schedule\/group-blocks\/([^/]+)\/toggle$/);
+  if (sMatch && method === 'PATCH') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const blk = scope.groupBlocks.find(b => b.id === sMatch[1]);
+    if (!blk) fail(404, 'Group block not found');
+    blk.active = !blk.active;
+    addAuditLog(scope, user, blk.active ? '启用教师组无课时间' : '暂停教师组无课时间', blk.label);
+    save();
+    return json(res, 200, { block: blk });
+  }
+  sMatch = pathname.match(/^\/api\/admin\/schedule\/group-blocks\/([^/]+)$/);
+  if (sMatch && method === 'DELETE') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    scope.groupBlocks = scope.groupBlocks.filter(b => b.id !== sMatch[1]);
+    save();
+    return json(res, 200, { ok: true });
+  }
   // --- Combined Classes (合班排课) ---
   if (pathname === '/api/admin/schedule/combined' && method === 'POST') {
     requireAdmin(user);
@@ -1690,7 +1769,9 @@ async function api(req, res, url) {
     }));
     const swapRequests = user.role === 'teacher' ? scope.swapRequests.filter(r => r.requesterId === user.id) : [];
     const schoolTeachers = user.role === 'teacher' ? db.users.filter(u => u.role === 'teacher' && u.schoolId === user.schoolId && u.active !== false).map(u => ({ id: u.id, name: u.name })) : [];
-    return json(res, 200, { published: true, publishedAt: pub.publishedAt, daysPerWeek: pub.settings.daysPerWeek, periods: pub.settings.periods, entries: enriched, swapRequests, schoolTeachers });
+    const myGroupIds = new Set((scope.teacherGroups || []).filter(g => Array.isArray(g.teacherIds) && g.teacherIds.includes(user.id)).map(g => g.id));
+    const groupActivities = user.role === 'teacher' ? (scope.groupBlocks || []).filter(b => b.active !== false && myGroupIds.has(b.groupId)).map(b => ({ ...b, groupName: scope.teacherGroups.find(g => g.id === b.groupId)?.name || '' })) : [];
+    return json(res, 200, { published: true, publishedAt: pub.publishedAt, daysPerWeek: pub.settings.daysPerWeek, periods: pub.settings.periods, entries: enriched, groupActivities, swapRequests, schoolTeachers });
   }
   if (pathname === '/api/teacher/schedule/requests' && method === 'POST') {
     requireRole(user, 'teacher');
