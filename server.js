@@ -788,6 +788,152 @@ async function api(req, res, url) {
     save();
     return json(res, 201, { importedCount: staged.length, users: staged.map(publicUser) });
   }
+  if (pathname === '/api/admin/backup/export' && method === 'GET') {
+    requireAdmin(user);
+    const global = isGlobalAdmin(user);
+    const schools = global ? db.schools : db.schools.filter(s => s.id === user.schoolId);
+    const users = global ? db.users : db.users.filter(u => u.schoolId === user.schoolId);
+    const userIds = new Set(users.map(u => u.id));
+    const teacherIds = new Set(users.filter(u => u.role === 'teacher').map(u => u.id));
+    const courses = global ? db.courses : db.courses.filter(c => teacherIds.has(c.teacherId));
+    const courseIds = new Set(courses.map(c => c.id));
+    const payload = {
+      exportedAt: now(),
+      version: 2,
+      schools,
+      users,
+      departments: global ? db.departments : db.departments.filter(d => d.schoolId === user.schoolId),
+      announcements: global ? db.announcements : db.announcements.filter(a => !a.schoolId || a.schoolId === user.schoolId),
+      courses,
+      enrollments: global ? db.enrollments : db.enrollments.filter(e => courseIds.has(e.courseId) || userIds.has(e.userId)),
+      quizzes: global ? db.quizzes : db.quizzes.filter(q => courseIds.has(q.courseId)),
+      attempts: global ? db.attempts : db.attempts.filter(a => courseIds.has(a.courseId)),
+      posts: global ? db.posts : db.posts.filter(pt => courseIds.has(pt.courseId)),
+      activity: global ? db.activity : db.activity.filter(act => courseIds.has(act.courseId) || userIds.has(act.userId)),
+      assignments: global ? db.assignments : db.assignments.filter(asg => courseIds.has(asg.courseId)),
+      submissions: global ? db.submissions : db.submissions.filter(sub => courseIds.has(sub.courseId)),
+      grades: global ? db.grades : db.grades.filter(g => courseIds.has(g.courseId)),
+    };
+    const stamp = new Date().toISOString().slice(0, 10);
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Disposition': `attachment; filename="zhixing-backup-${stamp}.json"`,
+      'Cache-Control': 'no-store',
+    });
+    res.end(JSON.stringify(payload, null, 2));
+    return;
+  }
+  if (pathname === '/api/admin/backup/merge' && method === 'POST') {
+    requireAdmin(user);
+    const data = body.backup && typeof body.backup === 'object' ? body.backup : body;
+    if (!data || typeof data !== 'object') fail(400, 'Invalid backup JSON payload');
+    const global = isGlobalAdmin(user);
+    const merged = { schools: 0, users: 0, departments: 0, announcements: 0, courses: 0, enrollments: 0, quizzes: 0, attempts: 0, posts: 0, assignments: 0, submissions: 0, grades: 0 };
+
+    const schoolIds = new Set(db.schools.map(s => s.id));
+    const schoolCodes = new Set(db.schools.map(s => String(s.code || '').toUpperCase()));
+    const schoolNames = new Set(db.schools.map(s => normalizeSchoolName(s.name)));
+    for (const s of (Array.isArray(data.schools) ? data.schools : [])) {
+      if (!s?.id || !s?.name) continue;
+      if (!global && s.id !== user.schoolId) continue;
+      const code = String(s.code || '').toUpperCase();
+      const norm = normalizeSchoolName(s.name);
+      if (schoolIds.has(s.id) || (code && schoolCodes.has(code)) || schoolNames.has(norm)) continue;
+      db.schools.push({ ...s });
+      schoolIds.add(s.id);
+      if (code) schoolCodes.add(code);
+      schoolNames.add(norm);
+      merged.schools++;
+    }
+
+    const userIds = new Set(db.users.map(u => u.id));
+    const userEmails = new Set(db.users.map(u => String(u.email || '').toLowerCase()));
+    const userAccts = new Set(db.users.flatMap(u => [u.accountId, u.studentId].filter(Boolean).map(x => String(x).toLowerCase())));
+    for (const u of (Array.isArray(data.users) ? data.users : [])) {
+      if (!u?.id || !u?.email || !u?.passwordHash) continue;
+      if (!global && u.schoolId !== user.schoolId) continue;
+      const em = String(u.email).toLowerCase();
+      const ids = [u.accountId, u.studentId].filter(Boolean).map(x => String(x).toLowerCase());
+      if (userIds.has(u.id) || userEmails.has(em) || ids.some(x => userAccts.has(x))) continue;
+      db.users.push({
+        ...u,
+        gender: typeof u.gender === 'string' ? u.gender : '',
+        grade: typeof u.grade === 'string' ? u.grade : '',
+        department: typeof u.department === 'string' ? u.department : '',
+        major: typeof u.major === 'string' ? u.major : '',
+        accountId: u.accountId || u.studentId || null,
+        active: u.active !== false,
+      });
+      userIds.add(u.id);
+      userEmails.add(em);
+      ids.forEach(x => userAccts.add(x));
+      merged.users++;
+    }
+
+    const deptIds = new Set(db.departments.map(d => d.id));
+    for (const d of (Array.isArray(data.departments) ? data.departments : [])) {
+      if (!d?.id || !d?.name || deptIds.has(d.id)) continue;
+      if (!global && d.schoolId !== user.schoolId) continue;
+      db.departments.push({ ...d });
+      deptIds.add(d.id);
+      merged.departments++;
+    }
+
+    const annIds = new Set(db.announcements.map(a => a.id));
+    for (const a of (Array.isArray(data.announcements) ? data.announcements : [])) {
+      if (!a?.id || !a?.title || annIds.has(a.id)) continue;
+      if (!global && a.schoolId && a.schoolId !== user.schoolId) continue;
+      db.announcements.push({ ...a });
+      annIds.add(a.id);
+      merged.announcements++;
+    }
+
+    const validTeacherIds = new Set(db.users.filter(u => u.role === 'teacher' && (global || u.schoolId === user.schoolId)).map(u => u.id));
+    const courseIds = new Set(db.courses.map(c => c.id));
+    const courseCodes = new Set(db.courses.map(c => String(c.enrollmentCode || '').toUpperCase()).filter(Boolean));
+    for (const c of (Array.isArray(data.courses) ? data.courses : [])) {
+      if (!c?.id || !c?.title || courseIds.has(c.id)) continue;
+      if (!global && !validTeacherIds.has(c.teacherId)) continue;
+      const code = String(c.enrollmentCode || '').toUpperCase();
+      if (code && courseCodes.has(code)) continue;
+      db.courses.push({ ...c, announcements: Array.isArray(c.announcements) ? c.announcements : [], gradeWeights: c.gradeWeights || { ...DEFAULT_WEIGHTS } });
+      courseIds.add(c.id);
+      if (code) courseCodes.add(code);
+      merged.courses++;
+    }
+
+    const allowedCourseIds = new Set(db.courses.filter(c => global || validTeacherIds.has(c.teacherId)).map(c => c.id));
+    const enrollKeys = new Set(db.enrollments.map(e => `${e.userId}:${e.courseId}`));
+    for (const e of (Array.isArray(data.enrollments) ? data.enrollments : [])) {
+      if (!e?.userId || !e?.courseId || enrollKeys.has(`${e.userId}:${e.courseId}`)) continue;
+      if (!global && !allowedCourseIds.has(e.courseId)) continue;
+      db.enrollments.push({ ...e });
+      enrollKeys.add(`${e.userId}:${e.courseId}`);
+      merged.enrollments++;
+    }
+
+    for (const [key, list] of [['quizzes', db.quizzes], ['attempts', db.attempts], ['posts', db.posts], ['assignments', db.assignments], ['submissions', db.submissions], ['grades', db.grades]]) {
+      const seen = new Set(list.map(x => x.id));
+      for (const item of (Array.isArray(data[key]) ? data[key] : [])) {
+        if (!item?.id || seen.has(item.id)) continue;
+        if (!global && item.courseId && !allowedCourseIds.has(item.courseId)) continue;
+        list.push({ ...item });
+        seen.add(item.id);
+        merged[key]++;
+      }
+    }
+
+    const actIds = new Set(db.activity.map(x => x.id));
+    for (const act of (Array.isArray(data.activity) ? data.activity : [])) {
+      if (!act?.id || actIds.has(act.id)) continue;
+      if (!global && act.courseId && !allowedCourseIds.has(act.courseId)) continue;
+      db.activity.push({ ...act });
+      actIds.add(act.id);
+    }
+
+    save();
+    return json(res, 200, { ok: true, merged });
+  }
   if (pathname === '/api/admin/overview' && method === 'GET') {
     requireAdmin(user);
     const organization = db.schools.find(school => school.id === user.schoolId) || null;

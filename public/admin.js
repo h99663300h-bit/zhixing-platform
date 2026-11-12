@@ -102,6 +102,16 @@
       '<form id="admin-add-dept-form"><div class="row wrap"><input name="name" maxlength="80" placeholder="Enter department name (e.g. 计算机学院)" required style="max-width:320px">' +
       '<button type="submit" class="btn btn-soft btn-sm">+ Add Department</button></div></form></section>';
   }
+  function backupPanel() {
+    return '<section class="panel panel-pad" style="margin-bottom:20px"><h2>Export Data Backup (导出数据备份)</h2>' +
+      '<p class="small muted">Download a JSON backup of all schools, accounts, departments, announcements, courses, and grades before redeploying.</p>' +
+      '<a class="btn btn-primary" href="/api/admin/backup/export" download>⬇ Export Full Backup (.json)</a></section>' +
+      '<section class="panel panel-pad"><h2>Merge & Restore Historical Data (合并恢复历史数据)</h2>' +
+      '<p class="small muted">Upload a previously exported <code>.json</code> backup file. Existing records are preserved and historical records are safely merged without duplicates.</p>' +
+      '<form id="admin-backup-merge-form" style="margin-top:12px"><div class="row wrap">' +
+      '<input id="admin-backup-file" type="file" accept=".json,application/json" required>' +
+      '<button type="submit" class="btn btn-soft">Merge Backup Data</button></div></form></section>';
+  }
   function announcementsTable() {
     const list = adminData?.announcements || [];
     const editing = annEditItem;
@@ -248,15 +258,16 @@
     const body = adminError
       ? '<section class="panel panel-pad"><p class="form-error">' + esc(adminError) + '</p><button class="btn btn-soft" data-admin-action="reload">Retry</button></section>'
       : !adminData ? '<section class="panel panel-pad">Loading administrator records…</section>'
-      : '<div class="page-head"><div><div class="eyebrow">' + scopeLabel + '</div><h1>' + (adminTab === 'teachers' ? 'Instructor Accounts' : adminTab === 'students' ? 'Student Accounts' : 'Information Announcements') +
+      : '<div class="page-head"><div><div class="eyebrow">' + scopeLabel + '</div><h1>' + (adminTab === 'teachers' ? 'Instructor Accounts' : adminTab === 'students' ? 'Student Accounts' : adminTab === 'announcements' ? 'Information Announcements' : 'Data Backup & Merge') +
         '</h1><p>Manage user access and student course enrollment.</p></div></div>' + organizationPanel + '<div class="stats-grid" style="margin-bottom:24px">' +
         stat('Instructors', n(s.teachers), 'Registered instructor accounts', '♧') + stat('Students', n(s.students), 'Registered student accounts', '▣') +
-        stat('Courses', n(s.courses), 'Courses across instructors', '▤') + stat('Announcements', n(s.announcements), 'Published school notices', '◈') + '</div>' + (adminTab === 'teachers' ? instructorTable() : adminTab === 'students' ? studentTable() : announcementsTable());
+        stat('Courses', n(s.courses), 'Courses across instructors', '▤') + stat('Announcements', n(s.announcements), 'Published school notices', '◈') + '</div>' + (adminTab === 'teachers' ? instructorTable() : adminTab === 'students' ? studentTable() : adminTab === 'announcements' ? announcementsTable() : backupPanel());
     return '<div class="mobile-overlay ' + (state.mobileOpen ? 'show' : '') + '" data-admin-action="close-menu"></div><div class="app-shell"><aside class="sidebar ' +
       (state.mobileOpen ? 'open' : '') + '">' + brand() + '<div class="sidebar-label">' + scopeLabel + '</div><nav class="nav-list" aria-label="Administrator Menu">' +
       '<button type="button" class="nav-btn ' + (adminTab === 'teachers' ? 'active' : '') + '" data-admin-action="tab" data-tab="teachers"><span class="ico">♧</span>Instructors' + ((adminData?.pendingTeachers?.length || 0) ? '<span class="nav-count">' + adminData.pendingTeachers.length + '</span>' : '') + '</button>' +
       '<button type="button" class="nav-btn ' + (adminTab === 'students' ? 'active' : '') + '" data-admin-action="tab" data-tab="students"><span class="ico">▣</span>Students</button>' +
-      '<button type="button" class="nav-btn ' + (adminTab === 'announcements' ? 'active' : '') + '" data-admin-action="tab" data-tab="announcements"><span class="ico">◈</span>Announcements</button></nav>' +
+      '<button type="button" class="nav-btn ' + (adminTab === 'announcements' ? 'active' : '') + '" data-admin-action="tab" data-tab="announcements"><span class="ico">◈</span>Announcements</button>' +
+      '<button type="button" class="nav-btn ' + (adminTab === 'backup' ? 'active' : '') + '" data-admin-action="tab" data-tab="backup"><span class="ico">⇩</span>Backup & Merge</button></nav>' +
       '<div class="sidebar-bottom"><div class="side-user"><span class="avatar sm">' + initials(state.user?.name) + '</span><span class="side-user-text"><strong>' + esc(state.user?.name) +
       '</strong><small>' + (organization ? 'School Administrator' : 'Site Administrator') + '</small></span><button class="icon-btn" type="button" data-admin-action="logout" aria-label="Sign Out" title="Sign Out">↪</button></div></div></aside>' +
       '<div class="main-area"><header class="topbar"><div class="row"><button class="mobile-menu" type="button" data-admin-action="toggle-menu" aria-label="Open Menu">☰</button>' +
@@ -379,7 +390,7 @@
 
   document.addEventListener('submit', event => {
     const form = event.target;
-    if (!['admin-reset-request','admin-reset-confirm','admin-add-teacher','admin-password-form','admin-import-student-form','admin-import-teacher-form','admin-add-dept-form','admin-dept-form','admin-announcement-form'].includes(form.id) && !form.classList.contains('admin-enrollment-form')) return;
+    if (!['admin-reset-request','admin-reset-confirm','admin-add-teacher','admin-password-form','admin-import-student-form','admin-import-teacher-form','admin-add-dept-form','admin-dept-form','admin-announcement-form','admin-backup-merge-form'].includes(form.id) && !form.classList.contains('admin-enrollment-form')) return;
     event.preventDefault();
     const values = Object.fromEntries(new FormData(form));
     if (form.id === 'admin-reset-request') {
@@ -416,6 +427,21 @@
       }, 'Import failed: ');
       return;
     }
+    if (form.id === 'admin-backup-merge-form') {
+      const file = form.querySelector('input[type="file"]')?.files?.[0];
+      if (!file) { showToast('Please choose a JSON backup file first', true); return; }
+      run(async () => {
+        const text = await file.text();
+        let parsed;
+        try { parsed = JSON.parse(text); } catch { throw new Error('Invalid JSON backup file'); }
+        const res = await api('/api/admin/backup/merge', { method: 'POST', body: JSON.stringify({ backup: parsed }) });
+        adminData = await api('/api/admin/overview');
+        render();
+        const m = res.merged || {};
+        showToast('Merged: ' + n(m.users) + ' account(s), ' + n(m.courses) + ' course(s), ' + n(m.announcements) + ' announcement(s)');
+      }, 'Merge failed: ');
+      return;
+    }
     if (form.id === 'admin-add-dept-form') {
       run(async () => {
         await api('/api/admin/departments', { method: 'POST', body: JSON.stringify({ name: values.name }) });
@@ -431,7 +457,7 @@
       }, 'Could not update department: ');
       return;
     }
-    if (form.id === 'admin-announcement-form') {
+    if (form.id === 'admin-announcement-form','admin-backup-merge-form') {
       const editId = form.dataset.id;
       run(async () => {
         if (editId) {
