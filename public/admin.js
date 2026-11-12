@@ -11,6 +11,9 @@
   let adminDialog = null;
   let deptDialogUser = null;
   let annEditItem = null;
+  let courseEditItem = null;
+  let courseStudentsModal = null;
+  let courseFilter = { q: '', department: '', teacherId: '' };
   let teacherFilter = { q: '', department: '', major: '', status: '' };
   let studentFilter = { q: '', department: '', major: '', gender: '' };
 
@@ -101,6 +104,63 @@
       '<div class="row wrap" style="gap:8px;margin:10px 0 14px">' + (tags || '<span class="small muted">No departments configured yet.</span>') + '</div>' +
       '<form id="admin-add-dept-form"><div class="row wrap"><input name="name" maxlength="80" placeholder="Enter department name (e.g. 计算机学院)" required style="max-width:320px">' +
       '<button type="submit" class="btn btn-soft btn-sm">+ Add Department</button></div></form></section>';
+  }
+  function coursesTable() {
+    const allCourses = adminData?.courses || [];
+    const activeTeachers = (adminData?.teachers || []).filter(t => t.active);
+    const depts = [...new Set([...(adminData?.departments || []).map(d => d.name), ...activeTeachers.map(t => t.department).filter(Boolean)])].sort();
+    const teachersInDept = courseFilter.department ? activeTeachers.filter(t => (t.department || '') === courseFilter.department) : activeTeachers;
+    const filteredCourses = allCourses.filter(c => {
+      if (courseFilter.q) {
+        const hay = [c.title, c.category, c.enrollmentCode, c.teacherName, ...(c.departments || [])].filter(Boolean).join(' ').toLowerCase();
+        if (!hay.includes(courseFilter.q.toLowerCase())) return false;
+      }
+      if (courseFilter.department) {
+        const cDepts = new Set(c.departments || []);
+        const matchTeacherDept = (c.teacherIds || [c.teacherId]).some(tid => {
+          const t = activeTeachers.find(x => x.id === tid);
+          return t && (t.department || '') === courseFilter.department;
+        });
+        if (!cDepts.has(courseFilter.department) && !matchTeacherDept) return false;
+      }
+      if (courseFilter.teacherId) {
+        const tIds = c.teacherIds || [c.teacherId];
+        if (!tIds.includes(courseFilter.teacherId)) return false;
+      }
+      return true;
+    });
+    const editing = courseEditItem;
+    const selectedIds = new Set(editing ? (editing.teacherIds || [editing.teacherId]) : []);
+    const teacherCheckboxes = activeTeachers.length
+      ? '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;max-height:180px;overflow:auto;padding:10px;border:1px solid var(--border);border-radius:10px;background:#fafbfe">' +
+        activeTeachers.map(t => '<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer"><input type="checkbox" name="teacherIds" value="' + esc(t.id) + '"' + (selectedIds.has(t.id) ? ' checked' : '') + '><span><strong>' + esc(t.name) + '</strong> <small class="muted">(' + esc(t.department || 'Unassigned') + ')</small></span></label>').join('') +
+        '</div>'
+      : '<p class="small muted">No active instructors available. Add or approve an instructor first.</p>';
+    const formHtml = '<section class="panel panel-pad" style="margin-bottom:20px"><h2>' + (editing ? 'Edit Course & Assigned Instructors' : 'Create Course & Assign Instructor(s)') + '</h2>' +
+      '<p class="small muted">Administrators can create courses and assign one or multiple instructors to teach together.</p>' +
+      '<form id="admin-course-form"' + (editing ? ' data-id="' + esc(editing.id) + '"' : '') + '>' +
+      '<div class="form-grid"><div class="field"><label for="admin-course-title">Course Name *</label><input id="admin-course-title" name="title" value="' + esc(editing?.title || '') + '" maxlength="100" placeholder="e.g. Introduction to AI" required></div>' +
+      '<div class="field"><label for="admin-course-category">Category *</label><input id="admin-course-category" name="category" value="' + esc(editing?.category || 'General Studies') + '" maxlength="40" required></div>' +
+      '<div class="field"><label for="admin-course-code">Enrollment Code (optional)</label><input id="admin-course-code" name="enrollmentCode" value="' + esc(editing?.enrollmentCode || '') + '" maxlength="20" placeholder="Leave blank to auto-generate"></div></div>' +
+      '<div class="field"><label for="admin-course-desc">Description *</label><textarea id="admin-course-desc" name="description" rows="2" maxlength="2000" placeholder="Course goals and overview…" required>' + esc(editing?.description || '') + '</textarea></div>' +
+      '<div class="field"><label>Assign Instructor(s) * (multi-select)</label>' + teacherCheckboxes + '</div>' +
+      '<div class="row wrap"><button type="submit" class="btn btn-primary">' + (editing ? 'Save Course Changes' : 'Create Course') + '</button>' +
+      (editing ? '<button type="button" class="btn btn-light" data-admin-action="cancel-edit-course">Cancel</button>' : '') + '</div></form></section>';
+    const filterBar = '<div class="filter-line" style="padding:0 20px 14px"><div class="searchbar"><span>⌕</span><input id="course-filter-q" data-admin-filter="course-q" type="search" value="' + esc(courseFilter.q) + '" placeholder="Search course, code, category, instructor"></div>' +
+      '<div class="row wrap"><select data-admin-filter="course-department" aria-label="Filter by department"><option value="">All Departments (按学院筛选)</option>' + depts.map(d => '<option value="' + esc(d) + '"' + (courseFilter.department === d ? ' selected' : '') + '>' + esc(d) + '</option>').join('') + '</select>' +
+      '<select data-admin-filter="course-teacher" aria-label="Filter by instructor"><option value="">All Instructors (按老师筛选)</option>' + teachersInDept.map(t => '<option value="' + esc(t.id) + '"' + (courseFilter.teacherId === t.id ? ' selected' : '') + '>' + esc(t.name) + (t.department ? ' · ' + esc(t.department) : '') + '</option>').join('') + '</select></div></div>';
+    const rows = filteredCourses.map(c => '<tr><td><strong>' + esc(c.title) + '</strong><br><span class="tiny muted">' + esc(c.category || 'General') + ' · Code: <code>' + esc(c.enrollmentCode || '—') + '</code></span></td>' +
+      '<td>' + esc(c.teacherName || 'Instructor') + '</td>' +
+      '<td>' + esc((c.departments || []).join(', ') || '—') + '</td>' +
+      '<td><span class="pill blue">' + n(c.studentCount) + ' students</span></td>' +
+      '<td>' + n(c.lessonCount) + ' units · ' + (c.quizAvailable ? 'Quiz Ready' : 'No Quiz') + '</td>' +
+      '<td><div class="row wrap"><button type="button" class="btn btn-light btn-sm" data-admin-action="view-course-students" data-id="' + esc(c.id) + '">Students (' + n(c.studentCount) + ')</button>' +
+      '<button type="button" class="btn btn-primary btn-sm" data-admin-action="manage-course" data-id="' + esc(c.id) + '">Manage Content →</button><button type="button" class="btn btn-soft btn-sm" data-admin-action="edit-course" data-id="' + esc(c.id) + '">Edit</button>' +
+      '<button type="button" class="btn btn-danger btn-sm" data-admin-action="delete-course" data-id="' + esc(c.id) + '">Delete</button></div></td></tr>').join('');
+    return formHtml + '<section class="panel"><div class="panel-pad"><h2>Course Management <span class="pill blue">' + filteredCourses.length + ' / ' + allCourses.length + '</span></h2>' +
+      '<p class="small muted">Filter by college/department and instructor to inspect course enrollment and details.</p></div>' +
+      filterBar + '<div class="table-wrap"><table class="data-table"><thead><tr><th>Course</th><th>Instructor(s)</th><th>Department</th><th>Enrolled</th><th>Content</th><th>Actions</th></tr></thead><tbody>' +
+      (rows || '<tr><td colspan="6">No matching courses.</td></tr>') + '</tbody></table></div></section>';
   }
   function backupPanel() {
     return '<section class="panel panel-pad" style="margin-bottom:20px"><h2>Export Data Backup (导出数据备份)</h2>' +
@@ -225,6 +285,16 @@
     return departmentPanel() + importSection + filterBar + cards;
   }
 
+  function courseStudentsDialog() {
+    if (!courseStudentsModal) return '';
+    const c = courseStudentsModal;
+    const list = c.enrolledStudents || [];
+    return '<div class="modal-backdrop" data-admin-action="close-course-students"><div class="modal"><div class="modal-head"><h2>' + esc(c.title) + ' · Enrolled Students (' + list.length + ')</h2>' +
+      '<button class="icon-btn" type="button" data-admin-action="close-course-students" aria-label="Close">✕</button></div><div class="modal-body">' +
+      '<p class="small muted">Instructor(s): <strong>' + esc(c.teacherName) + '</strong> · Enrollment Code: <code>' + esc(c.enrollmentCode || '—') + '</code></p>' +
+      (list.length ? list.map(s => '<div class="student-detail-row"><span><strong>' + esc(s.name) + '</strong> (' + esc(s.studentId || s.email) + ')</span><span class="tiny muted">' + esc([s.department, s.major].filter(Boolean).join(' · ') || 'No dept') + '</span></div>').join('') : '<p class="small muted">No students enrolled in this course yet.</p>') +
+      '</div><div class="modal-actions"><button class="btn btn-light" type="button" data-admin-action="close-course-students">Close</button></div></div></div>';
+  }
   function deptDialog() {
     if (!deptDialogUser) return '';
     const depts = (adminData?.departments || []).map(d => d.name);
@@ -248,31 +318,32 @@
       '<button class="btn btn-light" type="button" data-admin-action="close-dialog">Cancel</button><button class="btn btn-primary" type="submit">Save Password</button></div></form></div></div>';
   }
 
-  function adminShell() {
+  function adminShell(customBody = null) {
     const s = adminData?.stats || {};
     const organization = adminData?.organization;
     const scopeLabel = organization ? 'ORGANIZATION ADMINISTRATION' : 'SITE ADMINISTRATION';
     const organizationPanel = organization
       ? '<section class="panel panel-pad" style="margin-bottom:20px"><div class="row-between wrap"><div><div class="eyebrow">SCHOOL ORGANIZATION</div><h2 style="margin:5px 0">' + esc(organization.name) + '</h2><p class="small muted" style="margin:0">Students and instructors can join with the exact school name or code.</p></div><div><div class="tiny muted">SCHOOL CODE</div><strong style="font-size:20px">' + esc(organization.code) + '</strong></div></div></section>'
       : '';
-    const body = adminError
+    const body = customBody != null ? customBody : adminError
       ? '<section class="panel panel-pad"><p class="form-error">' + esc(adminError) + '</p><button class="btn btn-soft" data-admin-action="reload">Retry</button></section>'
       : !adminData ? '<section class="panel panel-pad">Loading administrator records…</section>'
-      : '<div class="page-head"><div><div class="eyebrow">' + scopeLabel + '</div><h1>' + (adminTab === 'teachers' ? 'Instructor Accounts' : adminTab === 'students' ? 'Student Accounts' : adminTab === 'announcements' ? 'Information Announcements' : 'Data Backup & Merge') +
+      : '<div class="page-head"><div><div class="eyebrow">' + scopeLabel + '</div><h1>' + (adminTab === 'teachers' ? 'Instructor Accounts' : adminTab === 'students' ? 'Student Accounts' : adminTab === 'courses' ? 'Course Management' : adminTab === 'announcements' ? 'Information Announcements' : 'Data Backup & Merge') +
         '</h1><p>Manage user access and student course enrollment.</p></div></div>' + organizationPanel + '<div class="stats-grid" style="margin-bottom:24px">' +
         stat('Instructors', n(s.teachers), 'Registered instructor accounts', '♧') + stat('Students', n(s.students), 'Registered student accounts', '▣') +
-        stat('Courses', n(s.courses), 'Courses across instructors', '▤') + stat('Announcements', n(s.announcements), 'Published school notices', '◈') + '</div>' + (adminTab === 'teachers' ? instructorTable() : adminTab === 'students' ? studentTable() : adminTab === 'announcements' ? announcementsTable() : backupPanel());
+        stat('Courses', n(s.courses), 'Courses across instructors', '▤') + stat('Announcements', n(s.announcements), 'Published school notices', '◈') + '</div>' + (adminTab === 'teachers' ? instructorTable() : adminTab === 'students' ? studentTable() : adminTab === 'courses' ? coursesTable() : adminTab === 'announcements' ? announcementsTable() : backupPanel());
     return '<div class="mobile-overlay ' + (state.mobileOpen ? 'show' : '') + '" data-admin-action="close-menu"></div><div class="app-shell"><aside class="sidebar ' +
       (state.mobileOpen ? 'open' : '') + '">' + brand() + '<div class="sidebar-label">' + scopeLabel + '</div><nav class="nav-list" aria-label="Administrator Menu">' +
       '<button type="button" class="nav-btn ' + (adminTab === 'teachers' ? 'active' : '') + '" data-admin-action="tab" data-tab="teachers"><span class="ico">♧</span>Instructors' + ((adminData?.pendingTeachers?.length || 0) ? '<span class="nav-count">' + adminData.pendingTeachers.length + '</span>' : '') + '</button>' +
       '<button type="button" class="nav-btn ' + (adminTab === 'students' ? 'active' : '') + '" data-admin-action="tab" data-tab="students"><span class="ico">▣</span>Students</button>' +
+      '<button type="button" class="nav-btn ' + (adminTab === 'courses' ? 'active' : '') + '" data-admin-action="tab" data-tab="courses"><span class="ico">▤</span>Courses</button>' +
       '<button type="button" class="nav-btn ' + (adminTab === 'announcements' ? 'active' : '') + '" data-admin-action="tab" data-tab="announcements"><span class="ico">◈</span>Announcements</button>' +
       '<button type="button" class="nav-btn ' + (adminTab === 'backup' ? 'active' : '') + '" data-admin-action="tab" data-tab="backup"><span class="ico">⇩</span>Backup & Merge</button></nav>' +
       '<div class="sidebar-bottom"><div class="side-user"><span class="avatar sm">' + initials(state.user?.name) + '</span><span class="side-user-text"><strong>' + esc(state.user?.name) +
       '</strong><small>' + (organization ? 'School Administrator' : 'Site Administrator') + '</small></span><button class="icon-btn" type="button" data-admin-action="logout" aria-label="Sign Out" title="Sign Out">↪</button></div></div></aside>' +
       '<div class="main-area"><header class="topbar"><div class="row"><button class="mobile-menu" type="button" data-admin-action="toggle-menu" aria-label="Open Menu">☰</button>' +
       '<div class="breadcrumbs">Zhixing Learning / <b>Administration</b></div></div><span class="role-chip">' + (organization ? 'School Administrator' : 'Site Administrator') + '</span></header><main class="content">' + body +
-      '<footer class="site-footer">Zhixing Learning · Site Administration</footer></main></div></div>' + passwordDialog() + deptDialog();
+      '<footer class="site-footer">Zhixing Learning · Site Administration</footer></main></div></div>' + passwordDialog() + deptDialog() + courseStudentsDialog();
   }
 
   render = function() {
@@ -282,6 +353,11 @@
     }
     if (state.user?.role === 'admin') {
       startAdminLoad();
+      if (state.page === 'detail' && state.selectedCourse) {
+        const backBtn = '<div style="margin-bottom:12px"><button type="button" class="btn-text" data-admin-action="back-to-courses">← Back to Admin Course Management</button></div>';
+        app.innerHTML = adminShell(backBtn + detailPage()) + modal();
+        return;
+      }
       app.innerHTML = adminShell();
       return;
     }
@@ -297,7 +373,7 @@
     const button = event.target.closest('[data-admin-action]');
     if (!button) return;
     const action = button.dataset.adminAction;
-    if ((action === 'close-dialog' || action === 'close-dept-dialog') && button.classList.contains('modal-backdrop') && event.target !== button) return;
+    if ((action === 'close-dialog' || action === 'close-dept-dialog' || action === 'close-course-students') && button.classList.contains('modal-backdrop') && event.target !== button) return;
     event.preventDefault();
     if (action === 'forgot') {
       state.authMode = 'forgot'; state.authError = ''; resetNotice = ''; render(); return;
@@ -305,11 +381,33 @@
     if (action === 'back-to-login') {
       resetToken = ''; resetNotice = ''; state.authMode = 'login'; state.authError = ''; render(); return;
     }
-    if (action === 'tab') { adminTab = button.dataset.tab; state.mobileOpen = false; render(); return; }
+    if (action === 'tab') { adminTab = button.dataset.tab; state.page = 'admin'; state.selectedCourse = null; state.mobileOpen = false; render(); return; }
+    if (action === 'back-to-courses') { adminTab = 'courses'; state.page = 'admin'; state.selectedCourse = null; render(); return; }
+    if (action === 'manage-course') {
+      run(async () => { await loadCourse(button.dataset.id); }, 'Could not open course: ');
+      return;
+    }
     if (action === 'toggle-menu') { state.mobileOpen = !state.mobileOpen; render(); return; }
     if (action === 'close-menu') { state.mobileOpen = false; render(); return; }
     if (action === 'close-dialog') { adminDialog = null; render(); return; }
     if (action === 'close-dept-dialog') { deptDialogUser = null; render(); return; }
+    if (action === 'close-course-students') { courseStudentsModal = null; render(); return; }
+    if (action === 'view-course-students') {
+      courseStudentsModal = (adminData?.courses || []).find(c => c.id === button.dataset.id) || null;
+      render();
+      return;
+    }
+    if (action === 'edit-course') {
+      courseEditItem = (adminData?.courses || []).find(c => c.id === button.dataset.id) || null;
+      render();
+      return;
+    }
+    if (action === 'cancel-edit-course') { courseEditItem = null; render(); return; }
+    if (action === 'delete-course') {
+      if (!confirm('Delete this course and all its enrollments/quizzes/assignments?')) return;
+      run(async () => { await api('/api/admin/courses/' + encodeURIComponent(button.dataset.id), { method: 'DELETE' }); if (courseEditItem?.id === button.dataset.id) courseEditItem = null; adminData = await api('/api/admin/overview'); render(); showToast('Course deleted'); }, 'Could not delete course: ');
+      return;
+    }
     if (action === 'assign-dept') {
       const source = (button.dataset.role === 'teacher' ? adminData?.teachers : adminData?.students) || [];
       const person = source.find(item => item.id === button.dataset.id);
@@ -390,7 +488,7 @@
 
   document.addEventListener('submit', event => {
     const form = event.target;
-    if (!['admin-reset-request','admin-reset-confirm','admin-add-teacher','admin-password-form','admin-import-student-form','admin-import-teacher-form','admin-add-dept-form','admin-dept-form','admin-announcement-form','admin-backup-merge-form'].includes(form.id) && !form.classList.contains('admin-enrollment-form')) return;
+    if (!['admin-reset-request','admin-reset-confirm','admin-add-teacher','admin-password-form','admin-import-student-form','admin-import-teacher-form','admin-add-dept-form','admin-dept-form','admin-announcement-form','admin-backup-merge-form','admin-course-form'].includes(form.id) && !form.classList.contains('admin-enrollment-form')) return;
     event.preventDefault();
     const values = Object.fromEntries(new FormData(form));
     if (form.id === 'admin-reset-request') {
@@ -442,6 +540,21 @@
       }, 'Merge failed: ');
       return;
     }
+    if (form.id === 'admin-course-form') {
+      const teacherIds = [...form.querySelectorAll('input[name="teacherIds"]:checked')].map(el => el.value);
+      if (!teacherIds.length) { showToast('Select at least one instructor', true); return; }
+      const editId = form.dataset.id;
+      const payload = { title: values.title, category: values.category, description: values.description, teacherIds, ...(values.enrollmentCode?.trim() ? { enrollmentCode: values.enrollmentCode.trim() } : {}) };
+      run(async () => {
+        if (editId) await api('/api/admin/courses/' + encodeURIComponent(editId), { method: 'PATCH', body: JSON.stringify(payload) });
+        else await api('/api/admin/courses', { method: 'POST', body: JSON.stringify(payload) });
+        courseEditItem = null;
+        adminData = await api('/api/admin/overview');
+        render();
+        showToast(editId ? 'Course updated' : 'Course created');
+      }, 'Could not save course: ');
+      return;
+    }
     if (form.id === 'admin-add-dept-form') {
       run(async () => {
         await api('/api/admin/departments', { method: 'POST', body: JSON.stringify({ name: values.name }) });
@@ -457,7 +570,7 @@
       }, 'Could not update department: ');
       return;
     }
-    if (form.id === 'admin-announcement-form','admin-backup-merge-form') {
+    if (form.id === 'admin-announcement-form','admin-backup-merge-form','admin-course-form') {
       const editId = form.dataset.id;
       run(async () => {
         if (editId) {
@@ -507,6 +620,9 @@
     else if (key === 'student-department') studentFilter.department = val;
     else if (key === 'student-major') studentFilter.major = val;
     else if (key === 'student-gender') studentFilter.gender = val;
+    else if (key === 'course-q') courseFilter.q = val;
+    else if (key === 'course-department') { courseFilter.department = val; courseFilter.teacherId = ''; }
+    else if (key === 'course-teacher') courseFilter.teacherId = val;
     const pos = refocus ? el.selectionStart : null;
     const id = el.id;
     render();

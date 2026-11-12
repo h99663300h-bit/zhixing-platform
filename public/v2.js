@@ -23,7 +23,7 @@
   teacherManage = function() {
     let index = 0;
     return baseTeacherManage().replace(/<span class="meta">/g, () => {
-      const course = state.courses.filter(c => c.teacherId === state.user.id)[index++];
+      const course = state.courses.filter(c => (c.teacherId === state.user.id || (Array.isArray(c.teacherIds) && c.teacherIds.includes(state.user.id))))[index++];
       return '<span class="meta">Enrollment Code ' + esc(course?.enrollmentCode || 'Not generated') + ' · ';
     });
   };
@@ -64,8 +64,8 @@
     return `<div class="page-head"><div><div class="eyebrow">COURSE ENROLLMENT</div><h1>Course Enrollment</h1><p>Enter the code provided by your teacher to join a course.</p></div></div><section class="panel panel-pad code-panel"><div class="code-icon">⌘</div><div><h2>Join a Course with a Code</h2><p class="muted small">Each course has a unique code set by its teacher. Ask your teacher for the code.</p><form id="enroll-code-form" class="code-form"><label for="enroll-code">Course Code</label><div class="row"><input id="enroll-code" name="code" placeholder="e.g., ABCD-2026" minlength="4" maxlength="20" autocomplete="off" required><button class="btn btn-primary" type="submit">Join Course →</button></div></form></div></section><div class="section-head"><div><h2>Enrolled Courses</h2><p>View or withdraw from your courses at any time</p></div><span class="pill blue">${enrolled.length} courses</span></div>${enrolled.length ? enrolled.map(c => `<div class="panel enroll-row"><div><strong>${esc(c.title)}</strong><p class="small muted">${esc(c.teacherName || 'Teacher')} · Progress: ${percent(c.progress)}</p></div><div class="row wrap"><button class="btn btn-soft btn-sm" data-action="open-course" data-id="${esc(c.id)}">Open Course</button><button class="btn btn-danger btn-sm" data-action="unenroll" data-id="${esc(c.id)}">Withdraw</button></div></div>`).join('') : em('No enrolled courses yet', 'Enter a course code to start learning.')}`;
   }
   function gradesPage() {
-    if (state.user.role === 'teacher') {
-      const courses = state.courses.filter(c => c.teacherId === state.user.id);
+    if (['teacher','admin'].includes(state.user.role)) {
+      const courses = state.courses.filter(c => (c.teacherId === state.user.id || (Array.isArray(c.teacherIds) && c.teacherIds.includes(state.user.id))));
       return `<div class="page-head"><div><div class="eyebrow">GRADE MANAGEMENT</div><h1>Grade Management</h1><p>Set grade weights and record coursework, in-class assessment, midterm, and final exam scores for each course.</p></div></div>${courses.length ? courses.map(c => `<div class="panel enroll-row"><div><strong>${esc(c.title)}</strong><p class="small muted">${n(c.studentCount)} students · Enrollment Code ${esc(c.enrollmentCode || 'Not generated')}</p></div><button class="btn btn-primary btn-sm" data-action="open-course-tab" data-id="${esc(c.id)}" data-tab="gradebook">Open Gradebook →</button></div>`).join('') : em('No courses yet','Create a course to set up its gradebook.')}`;
     }
     return `<div class="page-head"><div><div class="eyebrow">MY GRADES</div><h1>My Grades</h1><p>View your assessment results, class rank, and overall grade for each enrolled course.</p></div></div>${state.myGrades.length ? state.myGrades.map(g => studentGradeCard(g)).join('') : em('No grades yet','Grades will appear here after you join a course and complete assessments.')}`;
@@ -91,14 +91,14 @@
       state.submissions = [];
       state.assignmentSelected = null;
     }
-    if (tab === 'gradebook' && state.user.role === 'teacher') {
+    if (tab === 'gradebook' && ['teacher','admin'].includes(state.user.role)) {
       state.gradebook = await api('/api/courses/' + courseId + '/gradebook');
     }
   };
   const baseDetailPage = detailPage;
   detailPage = function() {
     if (!state.selectedCourse) return baseDetailPage();
-    const teacher = state.user.role === 'teacher';
+    const teacher = ['teacher','admin'].includes(state.user.role);
     let html = baseDetailPage();
     const tab = state.activeTab;
     const tabButtons = `<button class="tab ${tab === 'assignments' ? 'active' : ''}" data-action="detail-tab" data-tab="assignments">Assignment Management</button>${teacher ? `<button class="tab ${tab === 'gradebook' ? 'active' : ''}" data-action="detail-tab" data-tab="gradebook">Gradebook</button>` : ''}`;
@@ -129,13 +129,13 @@
       const video = `<div class="video-uploaded"><p class="small muted">Teacher-uploaded video</p><video class="lesson-video" controls preload="metadata" src="${esc(lesson.videoFileUrl)}">Your browser does not support video playback.</video></div>`;
       html = html.replace('</section>', video + '</section>');
     }
-    if (lesson && (state.user.role === 'teacher' || course.enrolled)) {
+    if (lesson && (['teacher','admin'].includes(state.user.role) || course.enrolled)) {
       html = html.replace('</section>', lessonResourcesPanel(lesson.id) + '</section>');
     }
     return html;
   };
   function lessonResourcesPanel(lessonId) {
-    const teacher = state.user.role === 'teacher';
+    const teacher = ['teacher','admin'].includes(state.user.role);
     const loaded = state.lessonResourcesFor === lessonId;
     const folders = loaded ? state.lessonFolders : [];
     const list = state.lessonFoldersLoading || !loaded
@@ -173,7 +173,7 @@
     return `<form class="grade-student-form panel" data-user-id="${esc(s.userId)}"><div class="row-between"><div><strong>${esc(s.name)} · ${esc(s.studentId)}</strong><p class="small muted">Assignment average ${s.assignmentAverage == null ? 'N/A' : esc(s.assignmentAverage)} · Best quiz score ${s.quizBest == null ? 'N/A' : esc(s.quizBest)}</p></div><span class="grade-total">${s.total == null ? 'Not published' : esc(Number(s.total).toFixed(1))}</span></div><div class="grade-grid">${gradeKeys.map(key => `<label class="grade-cell">${gradeNames[key]}<input name="${key}" type="number" min="0" max="100" step="0.1" value="${s.sources?.[key] === 'teacher' ? esc(s.scores?.[key]) : ''}" placeholder="${s.scores?.[key] == null ? 'Not graded' : 'Auto: ' + esc(s.scores[key])}">${['assignments','quiz'].includes(s.sources?.[key]) ? '<small>Calculated automatically; you can override it</small>' : ''}</label>`).join('')}</div><div class="row" style="justify-content:flex-end"><button class="btn btn-soft btn-sm" type="submit">Save Student Grades</button></div></form>`;
   }
   function assignmentPanel() {
-    const teacher = state.user.role === 'teacher';
+    const teacher = ['teacher','admin'].includes(state.user.role);
     if (!teacher && !state.selectedCourse.enrolled) return em('Join the course to submit assignments', 'Enter the code from your teacher in Course Enrollment.', '<button class="btn btn-primary" data-action="show-enroll-code">Go to Course Enrollment →</button>');
     const cards = state.assignments.map(a => assignmentCard(a, teacher)).join('');
     return `<div class="row-between" style="margin-bottom:18px"><div><h3 style="margin:0">${teacher ? 'Assignment Management' : 'Course Assignments'}</h3><p class="tiny muted">${teacher ? 'Create assignments, track submissions, and grade student work' : 'Submit text or a file, and view teacher feedback and grades'}</p></div>${teacher ? '<button class="btn btn-soft btn-sm" data-action="new-assignment">＋ Create Assignment</button>' : ''}</div>${cards || em('No assignments yet', teacher ? 'Create an assignment to start collecting student work.' : 'Assignments will appear here when your teacher posts them.')}${teacher && state.assignmentSelected ? submissionsPanel() : ''}`;
@@ -242,7 +242,7 @@
       state.lessonFoldersLoading = true;
       render();
       setTimeout(() => $('.lesson-open')?.scrollIntoView({ behavior:'smooth', block:'nearest' }), 0);
-      if (state.user.role === 'teacher' || state.selectedCourse?.enrolled) {
+      if (['teacher','admin'].includes(state.user.role) || state.selectedCourse?.enrolled) {
         run(async () => {
           try { await refreshLessonFolders(id); }
           catch (error) {

@@ -232,7 +232,29 @@ function invalidateSessions(userId) { for (const [key, session] of sessions) if 
 function courseById(courseId) { const course = db.courses.find(c => c.id === courseId); if (!course) fail(404, 'Course not found'); return course; }
 function quizByCourse(courseId) { return db.quizzes.find(q => q.courseId === courseId) || null; }
 function enrollment(userId, courseId) { return db.enrollments.find(e => e.userId === userId && e.courseId === courseId); }
-function ownedCourse(user, course) { requireRole(user, 'teacher'); if (course.teacherId !== user.id) fail(403, 'You can only manage your own courses'); return course; }
+function courseTeacherIds(course) {
+  const list = Array.isArray(course?.teacherIds) ? course.teacherIds.filter(Boolean) : [];
+  if (course?.teacherId && !list.includes(course.teacherId)) list.unshift(course.teacherId);
+  return list;
+}
+function isCourseTeacher(user, course) {
+  return Boolean(user && user.role === 'teacher' && courseTeacherIds(course).includes(user.id));
+}
+function canManageCourse(user, course) {
+  if (!user || !course) return false;
+  if (user.role === 'teacher') return isCourseTeacher(user, course);
+  if (user.role === 'admin') {
+    if (isGlobalAdmin(user)) return true;
+    const teachers = courseTeacherIds(course).map(tid => db.users.find(u => u.id === tid)).filter(Boolean);
+    return Boolean((user.schoolId && course.schoolId === user.schoolId) || teachers.some(t => canAdminManage(user, t)));
+  }
+  return false;
+}
+function ownedCourse(user, course) {
+  requireUser(user);
+  if (!canManageCourse(user, course)) fail(403, 'You can only manage courses in your own workspace');
+  return course;
+}
 function courseByLesson(lessonId) {
   const course = db.courses.find(c => c.lessons.some(l => l.id === lessonId));
   if (!course) fail(404, 'Lesson not found');
@@ -245,23 +267,25 @@ function folderById(lesson, folderId) {
 }
 function publicFolder(folder) { return { id: folder.id, name: folder.name, files: (folder.files || []).map(f => ({ id: f.id, name: f.name, size: f.size, mimeType: f.mimeType })) }; }
 function publicFolders(lesson) { return (lesson.resourceFolders || []).map(publicFolder); }
-function canStudy(user, course) { requireUser(user); if (user.role === 'teacher') return ownedCourse(user, course); if (!enrollment(user.id, course.id)) fail(403, 'Enroll in the course first'); return course; }
+function canStudy(user, course) { requireUser(user); if (['teacher', 'admin'].includes(user.role)) return ownedCourse(user, course); if (!enrollment(user.id, course.id)) fail(403, 'Enroll in the course first'); return course; }
 function progressFor(userId, course) {
   const enrolled = enrollment(userId, course.id);
   const completed = enrolled ? enrolled.completedLessonIds.filter(lessonId => course.lessons.some(l => l.id === lessonId)) : [];
   return { enrolled: Boolean(enrolled), completedLessonIds: completed, progress: course.lessons.length ? Math.round(completed.length / course.lessons.length * 100) : 0 };
 }
 function serializeCourse(course, user) {
-  const teacher = db.users.find(u => u.id === course.teacherId);
+  const tIds = courseTeacherIds(course);
+  const teachers = tIds.map(tid => db.users.find(u => u.id === tid)).filter(Boolean);
+  const teacherNames = teachers.map(t => t.name).join(', ') || 'Instructor';
   const p = user && user.role === 'student' ? progressFor(user.id, course) : { enrolled: false, completedLessonIds: [], progress: 0 };
-  const canSeeLessonContent = Boolean(user && ((user.role === 'student' && p.enrolled) || (user.role === 'teacher' && user.id === course.teacherId)));
+  const canSeeLessonContent = Boolean(user && ((user.role === 'student' && p.enrolled) || canManageCourse(user, course)));
   const lessons = [...course.lessons].sort((a, b) => a.order - b.order).map(lesson =>
     canSeeLessonContent
       ? { ...lesson, videoFile: undefined, videoFileUrl: lesson.videoFile ? '/api/lessons/' + lesson.id + '/video' : '' }
       : { ...lesson, content: '', videoUrl: '', videoFile: undefined, videoFileUrl: '' });
   const { enrollmentCode, ...publicCourse } = course;
   const announcements = canSeeLessonContent ? (course.announcements || []).slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))) : [];
-  return { ...publicCourse, ...(user?.role === 'teacher' && course.teacherId === user.id ? { enrollmentCode } : {}), teacherName: teacher?.name || 'Instructor', lessons, announcements, ...p,
+  return { ...publicCourse, teacherIds: tIds, ...(canManageCourse(user, course) ? { enrollmentCode } : {}), teacherName: teacherNames, lessons, announcements, ...p,
     studentCount: db.enrollments.filter(e => e.courseId === course.id).length, quizAvailable: Boolean(quizByCourse(course.id)?.questions.length) };
 }
 function recentActivity(kind, userId, courseId, detail) {
@@ -423,7 +447,7 @@ function validateQuiz(questions) {
 }
 function serializeQuiz(quiz, user) {
   if (!quiz) return null;
-  return { ...quiz, questions: quiz.questions.map(q => user?.role === 'teacher' ? { ...q } : { id: q.id, text: q.text, options: q.options }) };
+  return { ...quiz, questions: quiz.questions.map(q => ['teacher', 'admin'].includes(user?.role) ? { ...q } : { id: q.id, text: q.text, options: q.options }) };
 }
 function studentEnrollmentDetails(student, course) {
   const enrolled = enrollment(student.id, course.id);
@@ -467,7 +491,7 @@ function serializeAssignment(assignment, user) {
   const submissions = db.submissions.filter(s => s.assignmentId === assignment.id);
   const stats = { submitted: submissions.length, graded: submissions.filter(s => s.score != null).length,
     totalStudents: db.enrollments.filter(e => e.courseId === assignment.courseId).length };
-  return { ...assignment, ...(user.role === 'teacher' ? { stats } : { submission: serializeSubmission(submissions.find(s => s.userId === user.id)) }) };
+  return { ...assignment, ...(['teacher', 'admin'].includes(user.role) ? { stats } : { submission: serializeSubmission(submissions.find(s => s.userId === user.id)) }) };
 }
 function validateWeights(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) fail(400, 'Please set grade weights');
@@ -1013,7 +1037,24 @@ async function api(req, res, url) {
     const organization = db.schools.find(school => school.id === user.schoolId) || null;
     const teachers = db.users.filter(u => u.role === 'teacher' && canAdminManage(user, u));
     const teacherIds = new Set(teachers.map(teacher => teacher.id));
-    const courses = db.courses.filter(course => teacherIds.has(course.teacherId)).map(c => ({ id: c.id, title: c.title, teacherId: c.teacherId, teacherName: db.users.find(u => u.id === c.teacherId)?.name || 'Instructor', enrollmentCode: c.enrollmentCode }));
+    const courses = db.courses.filter(course => courseTeacherIds(course).some(tid => teacherIds.has(tid))).map(c => {
+      const tIds = courseTeacherIds(c);
+      const assigned = tIds.map(tid => db.users.find(u => u.id === tid)).filter(Boolean);
+      const enrolledList = db.enrollments.filter(e => e.courseId === c.id).map(e => db.users.find(u => u.id === e.userId && u.active !== false)).filter(Boolean);
+      return {
+        id: c.id, title: c.title, description: c.description || '', category: c.category || '',
+        cover: c.cover || '📘', color: c.color || '#6979dc',
+        teacherId: c.teacherId, teacherIds: tIds,
+        teacherName: assigned.map(t => t.name).join(', ') || 'Instructor',
+        departments: [...new Set(assigned.map(t => t.department).filter(Boolean))],
+        enrollmentCode: c.enrollmentCode,
+        lessonCount: (c.lessons || []).length,
+        quizAvailable: Boolean(quizByCourse(c.id)?.questions?.length),
+        studentCount: enrolledList.length,
+        enrolledStudents: enrolledList.map(s => ({ id: s.id, name: s.name, studentId: s.studentId || '', email: s.email, department: s.department || '', major: s.major || '' })),
+        createdAt: c.createdAt,
+      };
+    });
     const courseIds = new Set(courses.map(course => course.id));
     const students = db.users.filter(u => u.role === 'student' && canAdminManage(user, u)).map(u => ({ ...publicUser(u), enrollments: db.enrollments.filter(e => e.userId === u.id && courseIds.has(e.courseId)).map(e => { const course = db.courses.find(c => c.id === e.courseId); return course ? { courseId: course.id, courseTitle: course.title, teacherName: db.users.find(t => t.id === course.teacherId)?.name || 'Instructor' } : null; }).filter(Boolean) }));
     const organizations = isGlobalAdmin(user) ? db.schools.map(school => ({ id: school.id, name: school.name, code: school.code })) : organization ? [{ id: organization.id, name: organization.name, code: organization.code }] : [];
@@ -1034,7 +1075,7 @@ async function api(req, res, url) {
       .filter(a => isGlobalAdmin(user) || !a.schoolId || a.schoolId === user.schoolId)
       .slice()
       .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)));
-    return json(res, 200, { organization: organization ? { id: organization.id, name: organization.name, code: organization.code } : null, organizations, departments, announcements, teachers: teachers.map(t => ({ ...publicUser(t), courseCount: db.courses.filter(c => c.teacherId === t.id).length })), pendingTeachers, students, courses, stats: { teachers: teachers.length, students: students.length, courses: courses.length, pendingTeachers: pendingTeachers.length, announcements: announcements.length } });
+    return json(res, 200, { organization: organization ? { id: organization.id, name: organization.name, code: organization.code } : null, organizations, departments, announcements, teachers: teachers.map(t => ({ ...publicUser(t), courseCount: db.courses.filter(c => courseTeacherIds(c).includes(t.id)).length })), pendingTeachers, students, courses, stats: { teachers: teachers.length, students: students.length, courses: courses.length, pendingTeachers: pendingTeachers.length, announcements: announcements.length } });
   }
   if (pathname === '/api/announcements' && method === 'GET') {
     requireUser(user);
@@ -1123,6 +1164,62 @@ async function api(req, res, url) {
     delete teacher.pendingSchoolRequestedAt;
     save();
     return json(res, 200, { user: publicUser(teacher), ok: true });
+  }
+  if (pathname === '/api/admin/courses' && method === 'POST') {
+    requireAdmin(user);
+    const rawIds = Array.isArray(body.teacherIds) ? body.teacherIds : body.teacherId ? [body.teacherId] : [];
+    const teacherIds = [...new Set(rawIds.map(x => String(x || '').trim()).filter(Boolean))];
+    if (!teacherIds.length) fail(400, 'Select at least one instructor for this course');
+    for (const tid of teacherIds) {
+      const t = db.users.find(u => u.id === tid && u.role === 'teacher' && u.active !== false);
+      if (!t || !canAdminManage(user, t)) fail(400, 'Selected instructor is invalid or outside your school');
+    }
+    const course = {
+      id: id('course'), ...courseFields(body),
+      teacherId: teacherIds[0], teacherIds,
+      gradeWeights: { ...DEFAULT_WEIGHTS },
+      lessons: [], announcements: [], createdAt: now(), updatedAt: now(),
+    };
+    db.courses.push(course); save();
+    return json(res, 201, { course: serializeCourse(course, user) });
+  }
+  let adminCourseMatch = pathname.match(/^\/api\/admin\/courses\/([^/]+)$/);
+  if (adminCourseMatch && method === 'PATCH') {
+    requireAdmin(user);
+    const course = courseById(adminCourseMatch[1]);
+    const existingTeachers = courseTeacherIds(course).map(tid => db.users.find(u => u.id === tid)).filter(Boolean);
+    if (!isGlobalAdmin(user) && !existingTeachers.some(t => canAdminManage(user, t))) fail(404, 'Course not found');
+    Object.assign(course, courseFields(body, course));
+    if (body.teacherIds !== undefined || body.teacherId !== undefined) {
+      const rawIds = Array.isArray(body.teacherIds) ? body.teacherIds : body.teacherId ? [body.teacherId] : [];
+      const teacherIds = [...new Set(rawIds.map(x => String(x || '').trim()).filter(Boolean))];
+      if (!teacherIds.length) fail(400, 'Select at least one instructor for this course');
+      for (const tid of teacherIds) {
+        const t = db.users.find(u => u.id === tid && u.role === 'teacher' && u.active !== false);
+        if (!t || !canAdminManage(user, t)) fail(400, 'Selected instructor is invalid or outside your school');
+      }
+      course.teacherId = teacherIds[0];
+      course.teacherIds = teacherIds;
+    }
+    course.updatedAt = now();
+    save();
+    return json(res, 200, { course: serializeCourse(course, user) });
+  }
+  if (adminCourseMatch && method === 'DELETE') {
+    requireAdmin(user);
+    const course = courseById(adminCourseMatch[1]);
+    const existingTeachers = courseTeacherIds(course).map(tid => db.users.find(u => u.id === tid)).filter(Boolean);
+    if (!isGlobalAdmin(user) && !existingTeachers.some(t => canAdminManage(user, t))) fail(404, 'Course not found');
+    db.courses = db.courses.filter(c => c.id !== course.id);
+    db.enrollments = db.enrollments.filter(e => e.courseId !== course.id);
+    db.quizzes = db.quizzes.filter(q => q.courseId !== course.id);
+    db.attempts = db.attempts.filter(a => a.courseId !== course.id);
+    db.posts = db.posts.filter(pt => pt.courseId !== course.id);
+    db.assignments = db.assignments.filter(a => a.courseId !== course.id);
+    db.submissions = db.submissions.filter(s => s.courseId !== course.id);
+    db.grades = db.grades.filter(g => g.courseId !== course.id);
+    save();
+    return json(res, 200, { ok: true });
   }
   if (pathname === '/api/admin/teachers' && method === 'POST') {
     requireAdmin(user);
@@ -1263,7 +1360,7 @@ async function api(req, res, url) {
     requireUser(user);
     const submission = db.submissions.find(s => s.id === match[1]); if (!submission) fail(404, 'Assignment file not found');
     const assignment = assignmentById(submission.assignmentId); const course = courseById(assignment.courseId);
-    if (user.role === 'teacher') ownedCourse(user, course);
+    if (['teacher', 'admin'].includes(user.role)) ownedCourse(user, course);
     else if (submission.userId !== user.id || !enrollment(user.id, course.id)) fail(403, 'You cannot access another student’s assignment file');
     return streamUpload(req, res, submission.file);
   }
@@ -1525,12 +1622,12 @@ async function api(req, res, url) {
     const course = courseById(match[1]); canStudy(user, course);
     const post = db.posts.find(p => p.courseId === course.id && p.id === match[2]);
     if (!post) fail(404, 'Discussion post not found');
-    if (post.authorId !== user.id && user.role !== 'teacher') fail(403, 'You can only delete your own discussion posts');
+    if (post.authorId !== user.id && !canManageCourse(user, course)) fail(403, 'You can only delete your own discussion posts');
     db.posts = db.posts.filter(p => p.id !== post.id); save(); return json(res, 200, { ok: true });
   }
   if (pathname === '/api/teacher/overview' && method === 'GET') {
     requireRole(user, 'teacher');
-    const courses = db.courses.filter(c => c.teacherId === user.id);
+    const courses = db.courses.filter(c => isCourseTeacher(user, c));
     const courseIds = new Set(courses.map(c => c.id));
     const enrollments = db.enrollments.filter(e => courseIds.has(e.courseId));
     const enrolledStudentIds = new Set(enrollments.map(e => e.userId));
@@ -1548,7 +1645,7 @@ async function api(req, res, url) {
   }
   if (pathname === '/api/teacher/students' && method === 'GET') {
     requireRole(user, 'teacher');
-    const courses = db.courses.filter(c => c.teacherId === user.id);
+    const courses = db.courses.filter(c => isCourseTeacher(user, c));
     const courseIds = new Set(courses.map(c => c.id));
     const enrolledStudentIds = new Set(db.enrollments.filter(e => courseIds.has(e.courseId)).map(e => e.userId));
     const students = db.users.filter(u => u.role === 'student' && enrolledStudentIds.has(u.id)).map(u => {
