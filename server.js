@@ -6,6 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { streamZip } = require('./zip-stream');
 const storage = require('./storage');
+const sched = require('./scheduling');
 const resetMail = require('./email-smtp');
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -132,6 +133,7 @@ if (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD && !db.users.some(u =>
 function migrateDb(target) {
   let changed = false;
   if (!Array.isArray(target.schools)) { target.schools = []; changed = true; }
+  if (!target.scheduling || typeof target.scheduling !== 'object') { target.scheduling = {}; changed = true; }
   for (const key of ['assignments', 'submissions', 'grades', 'departments', 'announcements']) {
     if (!Array.isArray(target[key])) { target[key] = []; changed = true; }
   }
@@ -911,6 +913,7 @@ async function api(req, res, url) {
       assignments: global ? db.assignments : db.assignments.filter(asg => courseIds.has(asg.courseId)),
       submissions: global ? db.submissions : db.submissions.filter(sub => courseIds.has(sub.courseId)),
       grades: global ? db.grades : db.grades.filter(g => courseIds.has(g.courseId)),
+      scheduling: global ? (db.scheduling || {}) : { [user.schoolId || 'global']: sched.ensureScope(db, user.schoolId || 'global') },
     };
     const stamp = new Date().toISOString().slice(0, 10);
     res.writeHead(200, {
@@ -1029,8 +1032,414 @@ async function api(req, res, url) {
       actIds.add(act.id);
     }
 
+    if (data.scheduling && typeof data.scheduling === 'object') {
+      if (!db.scheduling || typeof db.scheduling !== 'object') db.scheduling = {};
+      for (const [sk, sv] of Object.entries(data.scheduling)) {
+        if (!global && sk !== (user.schoolId || 'global')) continue;
+        if (!db.scheduling[sk]) db.scheduling[sk] = sv;
+      }
+    }
     save();
     return json(res, 200, { ok: true, merged });
+  }
+  function schedScopeKey(u) { return u?.schoolId || 'global'; }
+  function addAuditLog(scope, actor, action, detail, reason = '') {
+    scope.auditLogs.unshift({ id: sched.id('log'), actorId: actor.id, actorName: actor.name, action, detail, reason, createdAt: sched.now() });
+    if (scope.auditLogs.length > 500) scope.auditLogs.length = 500;
+  }
+  if (pathname === '/api/admin/schedule' && method === 'GET') {
+    requireAdmin(user);
+    const key = isGlobalAdmin(user) && url.searchParams.get('schoolId') ? url.searchParams.get('schoolId') : schedScopeKey(user);
+    const scope = sched.ensureScope(db, key);
+    const teachers = db.users.filter(u => u.role === 'teacher' && canAdminManage(user, u)).map(publicUser);
+    const students = db.users.filter(u => u.role === 'student' && canAdminManage(user, u)).map(publicUser);
+    const conflicts = sched.detectAllConflicts(scope);
+    return json(res, 200, { scopeKey: key, scope, conflicts, teachers, students });
+  }
+  if (pathname === '/api/admin/schedule/settings' && method === 'PUT') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    if (body.schoolLevel !== undefined) scope.settings.schoolLevel = safeText(body.schoolLevel, 'School level', 30);
+    if (body.campusName !== undefined) scope.settings.campusName = safeText(body.campusName, 'Campus name', 60);
+    if (body.daysPerWeek !== undefined) {
+      const d = Number(body.daysPerWeek);
+      if (![5, 6].includes(d)) fail(400, 'Days per week must be 5 or 6');
+      scope.settings.daysPerWeek = d;
+    }
+    if (Array.isArray(body.periods) && body.periods.length) {
+      scope.settings.periods = body.periods.map((item, idx) => ({
+        id: String(item.id || sched.id('p')),
+        index: Number(item.index ?? idx + 1),
+        name: safeText(item.name, 'Period name', 30),
+        startTime: safeText(item.startTime, 'Start time', 10),
+        endTime: safeText(item.endTime, 'End time', 10),
+        isBreak: Boolean(item.isBreak),
+        breakLabel: safeText(item.breakLabel ?? '', 'Break label', 30, false),
+      }));
+    }
+    if (Array.isArray(body.blockedSlots)) {
+      scope.settings.blockedSlots = body.blockedSlots.filter(b => b?.key).map(b => ({ key: String(b.key), reason: safeText(b.reason ?? '特殊时段', 'Reason', 60, false) }));
+    }
+    addAuditLog(scope, user, '更新作息设置', `每周 ${scope.settings.daysPerWeek} 天，${scope.settings.periods.length} 个时段`);
+    save();
+    return json(res, 200, { settings: scope.settings });
+  }
+  if (pathname === '/api/admin/schedule/grades' && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const grade = {
+      id: sched.id('grd'),
+      name: safeText(body.name, 'Grade name', 40),
+      code: safeText(body.code ?? '', 'Grade code', 20, false),
+      maxWeeklyPeriods: Math.max(1, Math.min(60, Number(body.maxWeeklyPeriods || 40))),
+      stratified: Boolean(body.stratified),
+    };
+    scope.grades.push(grade); save();
+    return json(res, 201, { grade });
+  }
+  let sMatch = pathname.match(/^\/api\/admin\/schedule\/grades\/([^/]+)$/);
+  if (sMatch && method === 'DELETE') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    if (scope.classes.some(c => c.gradeId === sMatch[1])) fail(409, '请先删除或移出该年级下的班级');
+    scope.grades = scope.grades.filter(g => g.id !== sMatch[1]); save();
+    return json(res, 200, { ok: true });
+  }
+  if (pathname === '/api/admin/schedule/classes' && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const cls = {
+      id: sched.id('cls'),
+      name: safeText(body.name, 'Class name', 50),
+      code: safeText(body.code ?? '', 'Class code', 20, false),
+      gradeId: String(body.gradeId || ''),
+      type: ['admin', 'elective', 'interest'].includes(body.type) ? body.type : 'admin',
+      headTeacherId: String(body.headTeacherId || ''),
+      studentCount: Math.max(0, Number(body.studentCount || 0)),
+      blockedSlots: Array.isArray(body.blockedSlots) ? body.blockedSlots.map(String) : [],
+      studentIds: Array.isArray(body.studentIds) ? body.studentIds.map(String) : [],
+    };
+    scope.classes.push(cls); save();
+    return json(res, 201, { cls });
+  }
+  sMatch = pathname.match(/^\/api\/admin\/schedule\/classes\/([^/]+)$/);
+  if (sMatch && method === 'PATCH') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const cls = scope.classes.find(c => c.id === sMatch[1]);
+    if (!cls) fail(404, 'Class not found');
+    if (body.name !== undefined) cls.name = safeText(body.name, 'Class name', 50);
+    if (body.blockedSlots !== undefined && Array.isArray(body.blockedSlots)) cls.blockedSlots = body.blockedSlots.map(String);
+    if (body.studentIds !== undefined && Array.isArray(body.studentIds)) cls.studentIds = body.studentIds.map(String);
+    if (body.headTeacherId !== undefined) cls.headTeacherId = String(body.headTeacherId || '');
+    save();
+    return json(res, 200, { cls });
+  }
+  if (sMatch && method === 'DELETE') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    if (scope.entries.some(e => e.classId === sMatch[1])) fail(409, '该班级已有排课记录，请先清空或解除课表关联');
+    scope.classes = scope.classes.filter(c => c.id !== sMatch[1]);
+    scope.plans = scope.plans.filter(p => p.classId !== sMatch[1]); save();
+    return json(res, 200, { ok: true });
+  }
+  if (pathname === '/api/admin/schedule/subjects' && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const subject = {
+      id: sched.id('sub'),
+      name: safeText(body.name, 'Subject name', 50),
+      code: safeText(body.code ?? '', 'Subject code', 20, false),
+      group: safeText(body.group ?? '', 'Subject group', 40, false),
+      tier: ['major', 'minor', 'public'].includes(body.tier) ? body.tier : 'major',
+      weeklyHours: Math.max(1, Math.min(30, Number(body.weeklyHours || 4))),
+      preference: ['morning', 'afternoon', 'any'].includes(body.preference) ? body.preference : 'any',
+      avoidLastPeriod: Boolean(body.avoidLastPeriod),
+      consecutiveMode: ['none', 'allow', 'require'].includes(body.consecutiveMode) ? body.consecutiveMode : 'none',
+      consecutiveCount: Number(body.consecutiveCount) === 3 ? 3 : 2,
+      maxConsecutivePerWeek: Math.max(1, Math.min(10, Number(body.maxConsecutivePerWeek || 2))),
+      roomType: safeText(body.roomType ?? 'normal', 'Room type', 30, false),
+    };
+    scope.subjects.push(subject); save();
+    return json(res, 201, { subject });
+  }
+  sMatch = pathname.match(/^\/api\/admin\/schedule\/subjects\/([^/]+)$/);
+  if (sMatch && method === 'DELETE') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    if (scope.entries.some(e => e.subjectId === sMatch[1])) fail(409, '该科目已有排课记录，请先解除关联');
+    scope.subjects = scope.subjects.filter(s => s.id !== sMatch[1]);
+    scope.plans = scope.plans.filter(p => p.subjectId !== sMatch[1]); save();
+    return json(res, 200, { ok: true });
+  }
+  if (pathname === '/api/admin/schedule/rooms' && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const room = {
+      id: sched.id('rm'),
+      name: safeText(body.name, 'Room name', 50),
+      type: safeText(body.type ?? 'normal', 'Room type', 30, false),
+      capacity: Math.max(1, Number(body.capacity || 50)),
+      blockedSlots: Array.isArray(body.blockedSlots) ? body.blockedSlots.map(String) : [],
+    };
+    scope.rooms.push(room); save();
+    return json(res, 201, { room });
+  }
+  sMatch = pathname.match(/^\/api\/admin\/schedule\/rooms\/([^/]+)$/);
+  if (sMatch && method === 'DELETE') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    scope.rooms = scope.rooms.filter(r => r.id !== sMatch[1]); save();
+    return json(res, 200, { ok: true });
+  }
+  sMatch = pathname.match(/^\/api\/admin\/schedule\/teacher-rules\/([^/]+)$/);
+  if (sMatch && method === 'PUT') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    scope.teacherRules[sMatch[1]] = {
+      availableSlots: Array.isArray(body.availableSlots) ? body.availableSlots.map(String) : [],
+      blockedSlots: Array.isArray(body.blockedSlots) ? body.blockedSlots.map(String) : [],
+      preference: ['morning', 'afternoon', 'any'].includes(body.preference) ? body.preference : 'any',
+      maxDailyPeriods: Math.max(0, Math.min(15, Number(body.maxDailyPeriods || 0))),
+      allowConsecutive: body.allowConsecutive !== false,
+      avoidSameClassConsecutive: Boolean(body.avoidSameClassConsecutive),
+    };
+    save();
+    return json(res, 200, { rule: scope.teacherRules[sMatch[1]] });
+  }
+  if (pathname === '/api/admin/schedule/plans' && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const plan = {
+      id: sched.id('pln'),
+      classId: safeText(body.classId, 'Class', 60),
+      subjectId: safeText(body.subjectId, 'Subject', 60),
+      teacherId: safeText(body.teacherId, 'Teacher', 60),
+      roomId: String(body.roomId || ''),
+      weeklyHours: Math.max(1, Math.min(30, Number(body.weeklyHours || 2))),
+      fixed: Boolean(body.fixed),
+    };
+    scope.plans.push(plan); save();
+    return json(res, 201, { plan });
+  }
+  sMatch = pathname.match(/^\/api\/admin\/schedule\/plans\/([^/]+)$/);
+  if (sMatch && method === 'DELETE') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    scope.plans = scope.plans.filter(p => p.id !== sMatch[1]); save();
+    return json(res, 200, { ok: true });
+  }
+  if (pathname === '/api/admin/schedule/auto' && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const result = sched.autoSchedule(scope, { gradeId: body.gradeId || '' });
+    addAuditLog(scope, user, '一键智能排课', `成功排入 ${result.placedCount} 节，未排 ${result.unplaced.length} 项`);
+    save();
+    return json(res, 200, { ...result, entries: scope.entries });
+  }
+  if (pathname === '/api/admin/schedule/entries' && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const ignore = body.id ? new Set([body.id]) : new Set();
+    const candidate = {
+      id: body.id || sched.id('ent'),
+      planId: body.planId || 'custom',
+      classId: safeText(body.classId, 'Class', 60),
+      subjectId: safeText(body.subjectId, 'Subject', 60),
+      teacherId: safeText(body.teacherId, 'Teacher', 60),
+      roomId: body.roomId || null,
+      day: Number(body.day),
+      periodId: safeText(body.periodId, 'Period', 30),
+      locked: Boolean(body.locked),
+      temporary: Boolean(body.temporary),
+      overrideReason: '',
+      updatedAt: sched.now(),
+    };
+    const check = sched.checkPlacement(scope, candidate, ignore);
+    if (!check.valid && !body.forceOverride) {
+      const teachers = db.users.filter(u => u.role === 'teacher' && canAdminManage(user, u));
+      return json(res, 409, {
+        error: check.hard[0].message,
+        hard: check.hard,
+        warnings: check.warnings,
+        alternatives: sched.suggestAlternatives(scope, candidate, 3),
+        substitutes: sched.suggestSubstitutes(scope, teachers, candidate.day, candidate.periodId, candidate.subjectId),
+      });
+    }
+    if (!check.valid && body.forceOverride) {
+      const reason = safeText(body.overrideReason, '强制放行原因', 200);
+      candidate.overrideReason = reason;
+      addAuditLog(scope, user, '强制放行冲突排课', `${check.hard.map(h => h.message).join('；')}`, reason);
+    } else {
+      addAuditLog(scope, user, body.id ? '手动调课' : '手动排课', `周${candidate.day} ${candidate.periodId}`);
+    }
+    if (body.id) {
+      const idx = scope.entries.findIndex(e => e.id === body.id);
+      if (idx >= 0) scope.entries[idx] = candidate;
+      else scope.entries.push(candidate);
+    } else {
+      scope.entries.push(candidate);
+    }
+    save();
+    return json(res, 200, { entry: candidate, warnings: check.warnings, conflicts: sched.detectAllConflicts(scope) });
+  }
+  if (pathname === '/api/admin/schedule/swap' && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const a = scope.entries.find(e => e.id === body.entryAId);
+    const b = scope.entries.find(e => e.id === body.entryBId);
+    if (!a || !b) fail(404, '未找到要互换的课程');
+    if (a.locked || b.locked) fail(400, '已锁定的固定课程不可拖拽互换');
+    const ignore = new Set([a.id, b.id]);
+    const nextA = { ...a, day: b.day, periodId: b.periodId, temporary: true, updatedAt: sched.now() };
+    const nextB = { ...b, day: a.day, periodId: a.periodId, temporary: true, updatedAt: sched.now() };
+    const chkA = sched.checkPlacement(scope, nextA, ignore);
+    const chkB = sched.checkPlacement(scope, nextB, ignore);
+    if ((!chkA.valid || !chkB.valid) && !body.forceOverride) {
+      return json(res, 409, {
+        error: [...chkA.hard, ...chkB.hard][0]?.message || '互换后存在冲突',
+        hard: [...chkA.hard, ...chkB.hard],
+        warnings: [...chkA.warnings, ...chkB.warnings],
+      });
+    }
+    Object.assign(a, nextA);
+    Object.assign(b, nextB);
+    addAuditLog(scope, user, '拖拽互换调课', `周${b.day}${b.periodId} ↔ 周${a.day}${a.periodId}`, body.overrideReason || '');
+    save();
+    return json(res, 200, { ok: true, entries: scope.entries, conflicts: sched.detectAllConflicts(scope) });
+  }
+  sMatch = pathname.match(/^\/api\/admin\/schedule\/entries\/([^/]+)\/lock$/);
+  if (sMatch && method === 'PATCH') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const entry = scope.entries.find(e => e.id === sMatch[1]);
+    if (!entry) fail(404, 'Entry not found');
+    entry.locked = body.locked === undefined ? !entry.locked : Boolean(body.locked);
+    save();
+    return json(res, 200, { entry });
+  }
+  sMatch = pathname.match(/^\/api\/admin\/schedule\/entries\/([^/]+)$/);
+  if (sMatch && method === 'DELETE') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    scope.entries = scope.entries.filter(e => e.id !== sMatch[1]);
+    addAuditLog(scope, user, '删除排课记录', sMatch[1]);
+    save();
+    return json(res, 200, { ok: true });
+  }
+  if (pathname === '/api/admin/schedule/publish' && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    scope.published = {
+      publishedAt: sched.now(),
+      publishedBy: user.name,
+      settings: structuredClone(scope.settings),
+      grades: structuredClone(scope.grades),
+      classes: structuredClone(scope.classes),
+      subjects: structuredClone(scope.subjects),
+      rooms: structuredClone(scope.rooms),
+      entries: structuredClone(scope.entries),
+    };
+    addAuditLog(scope, user, '发布正式课表', `同步 ${scope.entries.length} 条排课记录给全校师生`);
+    save();
+    return json(res, 200, { published: scope.published });
+  }
+  if (pathname === '/api/admin/schedule/archive' && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const archive = { id: sched.id('arc'), name: safeText(body.name || '课表存档', 'Archive name', 60), createdAt: sched.now(), entryCount: scope.entries.length, entries: structuredClone(scope.entries) };
+    scope.archives.unshift(archive); save();
+    return json(res, 201, { archive });
+  }
+  sMatch = pathname.match(/^\/api\/admin\/schedule\/requests\/([^/]+)\/review$/);
+  if (sMatch && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const reqItem = scope.swapRequests.find(r => r.id === sMatch[1]);
+    if (!reqItem || reqItem.status !== 'pending') fail(404, 'Pending swap request not found');
+    const approve = body.decision === 'approve';
+    reqItem.status = approve ? 'approved' : 'rejected';
+    reqItem.reviewerName = user.name;
+    reqItem.reviewNote = safeText(body.note ?? '', 'Review note', 200, false);
+    reqItem.reviewedAt = sched.now();
+    if (approve) {
+      const entry = scope.entries.find(e => e.id === reqItem.entryId);
+      if (entry) {
+        if (reqItem.substituteTeacherId) entry.teacherId = reqItem.substituteTeacherId;
+        if (reqItem.targetDay && reqItem.targetPeriodId) { entry.day = Number(reqItem.targetDay); entry.periodId = reqItem.targetPeriodId; }
+        entry.temporary = true;
+        entry.updatedAt = sched.now();
+        if (scope.published) scope.published.entries = structuredClone(scope.entries);
+      }
+      addAuditLog(scope, user, '审批通过调课申请', `${reqItem.requesterName}: ${reqItem.reason}`);
+    } else {
+      addAuditLog(scope, user, '驳回调课申请', `${reqItem.requesterName}: ${reqItem.reason}`);
+    }
+    save();
+    return json(res, 200, { request: reqItem });
+  }
+  if (pathname === '/api/admin/schedule/export' && method === 'GET') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const daysMap = { 1: '周一', 2: '周二', 3: '周三', 4: '周四', 5: '周五', 6: '周六' };
+    const rows = ['\uFEFF星期,节次,时间,班级,科目,教师,教室,状态'];
+    for (const e of scope.entries) {
+      const p = scope.settings.periods.find(x => x.id === e.periodId);
+      const cls = scope.classes.find(c => c.id === e.classId)?.name || '';
+      const sub = scope.subjects.find(s => s.id === e.subjectId)?.name || '';
+      const tch = db.users.find(u => u.id === e.teacherId)?.name || '';
+      const rm = scope.rooms.find(r => r.id === e.roomId)?.name || '';
+      const st = e.locked ? '已锁定' : e.temporary ? '临时调课' : '正常';
+      rows.push([daysMap[e.day] || e.day, p?.name || e.periodId, p ? `${p.startTime}-${p.endTime}` : '', cls, sub, tch, rm, st].map(v => `"${String(v).replace(/"/g, '""')}"`).join(','));
+    }
+    res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="zhixing-timetable.csv"', 'Cache-Control': 'no-store' });
+    res.end(rows.join('\r\n'));
+    return;
+  }
+  if (pathname === '/api/schedule/my' && method === 'GET') {
+    requireUser(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const pub = scope.published;
+    if (!pub) return json(res, 200, { published: false, entries: [], periods: scope.settings.periods, daysPerWeek: scope.settings.daysPerWeek, swapRequests: [] });
+    let entries = [];
+    if (user.role === 'teacher') {
+      entries = pub.entries.filter(e => e.teacherId === user.id);
+    } else if (user.role === 'student') {
+      const myClassIds = new Set((pub.classes || []).filter(c => Array.isArray(c.studentIds) && c.studentIds.includes(user.id)).map(c => c.id));
+      entries = myClassIds.size ? pub.entries.filter(e => myClassIds.has(e.classId)) : pub.entries;
+    } else {
+      entries = pub.entries;
+    }
+    const enriched = entries.map(e => ({
+      ...e,
+      className: pub.classes.find(c => c.id === e.classId)?.name || '',
+      subjectName: pub.subjects.find(s => s.id === e.subjectId)?.name || '',
+      teacherName: db.users.find(u => u.id === e.teacherId)?.name || '',
+      roomName: pub.rooms.find(r => r.id === e.roomId)?.name || '',
+    }));
+    const swapRequests = user.role === 'teacher' ? scope.swapRequests.filter(r => r.requesterId === user.id) : [];
+    const schoolTeachers = user.role === 'teacher' ? db.users.filter(u => u.role === 'teacher' && u.schoolId === user.schoolId && u.active !== false).map(u => ({ id: u.id, name: u.name })) : [];
+    return json(res, 200, { published: true, publishedAt: pub.publishedAt, daysPerWeek: pub.settings.daysPerWeek, periods: pub.settings.periods, entries: enriched, swapRequests, schoolTeachers });
+  }
+  if (pathname === '/api/teacher/schedule/requests' && method === 'POST') {
+    requireRole(user, 'teacher');
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const entry = scope.entries.find(e => e.id === body.entryId && e.teacherId === user.id);
+    if (!entry) fail(404, '未找到您负责的该节课程');
+    const reqItem = {
+      id: sched.id('swp'),
+      requesterId: user.id,
+      requesterName: user.name,
+      entryId: entry.id,
+      targetDay: body.targetDay ? Number(body.targetDay) : null,
+      targetPeriodId: body.targetPeriodId ? String(body.targetPeriodId) : null,
+      substituteTeacherId: body.substituteTeacherId ? String(body.substituteTeacherId) : null,
+      reason: safeText(body.reason, '调课原因', 300),
+      status: 'pending',
+      createdAt: sched.now(),
+    };
+    scope.swapRequests.unshift(reqItem); save();
+    return json(res, 201, { request: reqItem });
   }
   if (pathname === '/api/admin/overview' && method === 'GET') {
     requireAdmin(user);
