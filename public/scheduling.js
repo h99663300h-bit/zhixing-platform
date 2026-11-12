@@ -1,6 +1,18 @@
 // 51-style Intelligent Course Scheduling Workspace (Admin) & Personal Timetable (Teacher/Student).
 (() => {
-  const DAYS = ['', '周一', '周二', '周三', '周四', '周五', '周六'];
+  const DAYS = ['', '周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+  const PREFS_KEY = 'zhixing_timetable_prefs';
+  function loadPrefs() {
+    try {
+      const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(PREFS_KEY) : null;
+      if (raw) return { displayMode: 'course_teacher_room', rowHeight: 'standard', fontSize: 'md', showWeekend: false, ...JSON.parse(raw) };
+    } catch {}
+    return { displayMode: 'course_teacher_room', rowHeight: 'standard', fontSize: 'md', showWeekend: false };
+  }
+  function savePrefs(prefs) {
+    try { if (typeof localStorage !== 'undefined') localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch {}
+  }
+
   window.schedUI = {
     subTab: 'timetable', // timetable | basedata | approvals
     viewMode: 'class',   // class | teacher | room | overview | conflicts
@@ -18,10 +30,29 @@
     myLoading: false,
     examView: 'plan',
     selectedExamId: '',
+    optionsOpen: false,
+    prefs: loadPrefs(),
   };
 
+  function getDisplayLines(e, scope, teachers) {
+    const subj = scope.subjects.find(s => s.id === e.subjectId)?.name || '课程';
+    const tch = teachers.find(t => t.id === e.teacherId)?.name || '';
+    const rm = scope.rooms.find(r => r.id === e.roomId)?.name || '';
+    const mode = schedUI.prefs.displayMode || 'course_teacher_room';
+    if (mode === 'course') return [subj];
+    if (mode === 'course_teacher') return [subj, tch].filter(Boolean);
+    if (mode === 'teacher') return [tch || '未指定教师'];
+    if (mode === 'room') return [rm || '未指定教室'];
+    return [subj, tch, rm].filter(Boolean);
+  }
+  function getStyleMetrics() {
+    const pad = schedUI.prefs.rowHeight === 'compact' ? '4px 6px' : schedUI.prefs.rowHeight === 'relaxed' ? '11px 10px' : '7px 9px';
+    const font = schedUI.prefs.fontSize === 'sm' ? '11px' : schedUI.prefs.fontSize === 'lg' ? '15px' : '13px';
+    return { pad, font };
+  }
   function getDayNames(days) {
-    return Array.from({ length: Number(days || 5) }, (_, i) => ({ day: i + 1, label: DAYS[i + 1] }));
+    const count = schedUI.prefs.showWeekend ? Math.max(Number(days || 5), 7) : Number(days || 5);
+    return Array.from({ length: count }, (_, i) => ({ day: i + 1, label: DAYS[i + 1] || ('周' + (i + 1)) }));
   }
 
   async function loadAdminSchedule() {
@@ -66,17 +97,15 @@
   }
 
   function renderCellCard(e, scope, teachers, conflictSet) {
-    const subj = scope.subjects.find(s => s.id === e.subjectId);
-    const cls = scope.classes.find(c => c.id === e.classId);
-    const tch = teachers.find(t => t.id === e.teacherId);
-    const rm = scope.rooms.find(r => r.id === e.roomId);
+    const lines = getDisplayLines(e, scope, teachers);
+    const { pad, font } = getStyleMetrics();
     const hasConflict = conflictSet.has(e.id);
     const border = hasConflict ? '2px solid #dc2626' : e.temporary ? '1.5px dashed #3b82f6' : '1px solid var(--border)';
     const bg = hasConflict ? '#fef2f2' : e.locked ? '#f8fafc' : '#fff';
-    return '<div draggable="' + (!e.locked) + '" data-sched-entry="' + esc(e.id) + '" style="padding:7px 9px;border-radius:8px;border:' + border + ';background:' + bg + ';cursor:' + (e.locked ? 'default' : 'grab') + ';margin-bottom:4px">' +
-      '<div class="row-between" style="gap:4px"><strong style="font-size:13px">' + esc(subj?.name || '课程') + '</strong>' +
+    return '<div draggable="' + (!e.locked) + '" data-sched-entry="' + esc(e.id) + '" style="padding:' + pad + ';font-size:' + font + ';border-radius:8px;border:' + border + ';background:' + bg + ';cursor:' + (e.locked ? 'default' : 'grab') + ';margin-bottom:4px">' +
+      '<div class="row-between" style="gap:4px"><strong>' + esc(lines[0] || '') + '</strong>' +
       '<span>' + (e.locked ? '🔒' : '') + (e.groupId ? '<span class="pill" style="background:#ede9fe;color:#5b21b6;font-size:10px;padding:1px 5px">合班</span>' : '') + (e.temporary ? '<span class="pill blue" style="font-size:10px;padding:1px 5px">临时</span>' : '') + (hasConflict ? '<span class="pill" style="background:#fee2e2;color:#b91c1c;font-size:10px;padding:1px 5px">冲突</span>' : '') + '</span></div>' +
-      '<div class="tiny muted">' + esc(tch?.name || '') + (cls ? ' · ' + esc(cls.name) : '') + (rm ? ' · ' + esc(rm.name) : '') + '</div>' +
+      (lines.length > 1 ? '<div class="tiny muted" style="white-space:pre-line">' + esc(lines.slice(1).join('\n')) + '</div>' : '') +
       '<div class="row" style="gap:6px;margin-top:4px">' +
       '<button type="button" class="btn-text" style="font-size:11px;padding:0" data-sched-action="toggle-lock" data-id="' + esc(e.id) + '">' + (e.locked ? '解锁' : '锁定') + '</button>' +
       '<button type="button" class="btn-text" style="font-size:11px;padding:0;color:#dc2626" data-sched-action="delete-entry" data-id="' + esc(e.id) + '">删除</button>' +
@@ -108,6 +137,75 @@
     return '<div class="table-wrap"><table class="data-table" style="border-collapse:collapse"><thead>' + header + '</thead><tbody>' + rows + '</tbody></table></div>';
   }
 
+  function renderOptionsDropdown() {
+    const pr = schedUI.prefs;
+    const modes = [
+      ['course', '只显示课程名称'],
+      ['course_teacher', '显示课程名称 + 教师'],
+      ['course_teacher_room', '显示课程名称 + 教师 + 教室'],
+      ['teacher', '仅显示教师名称'],
+      ['room', '仅显示教室名称'],
+    ];
+    return '<div style="position:relative;display:inline-block">' +
+      '<button type="button" class="btn btn-light btn-sm" data-sched-action="toggle-options">⚙ 课表选项 ▾</button>' +
+      (schedUI.optionsOpen ? '<div class="panel panel-pad" style="position:absolute;left:0;top:110%;z-index:50;min-width:255px;box-shadow:0 12px 32px rgba(15,23,42,.15)">' +
+        '<div class="tiny muted" style="margin-bottom:6px"><strong>显示内容（实时生效）</strong></div>' +
+        modes.map(([k, label]) => '<label style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px;cursor:pointer"><input type="radio" name="schedDisplayMode" data-sched-pref="displayMode" value="' + k + '"' + (pr.displayMode === k ? ' checked' : '') + '><span>' + label + '</span></label>').join('') +
+        '<hr style="margin:8px 0;border:0;border-top:1px solid var(--border)">' +
+        '<div class="tiny muted" style="margin-bottom:6px"><strong>📐 样式设置</strong></div>' +
+        '<div class="field" style="margin-bottom:8px"><label class="tiny">行高</label><select data-sched-pref="rowHeight"><option value="compact"' + (pr.rowHeight==='compact'?' selected':'') + '>紧凑</option><option value="standard"' + (pr.rowHeight==='standard'?' selected':'') + '>标准</option><option value="relaxed"' + (pr.rowHeight==='relaxed'?' selected':'') + '>宽松</option></select></div>' +
+        '<div class="field" style="margin-bottom:8px"><label class="tiny">字体大小</label><select data-sched-pref="fontSize"><option value="sm"' + (pr.fontSize==='sm'?' selected':'') + '>小</option><option value="md"' + (pr.fontSize==='md'?' selected':'') + '>中</option><option value="lg"' + (pr.fontSize==='lg'?' selected':'') + '>大</option></select></div>' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer"><input type="checkbox" data-sched-pref="showWeekend"' + (pr.showWeekend ? ' checked' : '') + '><span>显示周末 (周六/日)</span></label>' +
+        '</div>' : '') +
+      '</div>';
+  }
+
+  function exportWysiwygExcel(d) {
+    const scope = d.scope;
+    const teachers = d.teachers || [];
+    const conflicts = d.conflicts || [];
+    const conflictSet = new Set(conflicts.filter(c => c.hard.length).map(c => c.entryId));
+    const days = getDayNames(scope.settings.daysPerWeek);
+    const periods = scope.settings.periods || [];
+    const blockedSet = new Set((scope.settings.blockedSlots || []).map(b => b.key));
+    const { pad, font } = getStyleMetrics();
+    const targetClasses = schedUI.viewMode === 'class' && schedUI.selectedClassId
+      ? scope.classes.filter(c => c.id === schedUI.selectedClassId)
+      : scope.classes;
+    let tables = '';
+    for (const cls of targetClasses) {
+      const entries = scope.entries.filter(e => e.classId === cls.id);
+      let rows = '<tr><th style="background:#eef2ff;border:1px solid #cbd5e1;padding:6px">节次 / 时间</th>' +
+        days.map(day => '<th style="background:' + (day.day >= 6 ? '#f1f5f9' : '#eef2ff') + ';border:1px solid #cbd5e1;padding:6px">' + day.label + '</th>').join('') + '</tr>';
+      for (const p of periods) {
+        if (p.isBreak) {
+          rows += '<tr><td colspan="' + (days.length + 1) + '" style="background:#f3f4f6;color:#6b7280;text-align:center;border:1px solid #cbd5e1;padding:4px">' + esc(p.name) + ' (' + esc(p.startTime + '-' + p.endTime) + ')</td></tr>';
+          continue;
+        }
+        const cells = days.map(day => {
+          const key = day.day + '-' + p.id;
+          if (blockedSet.has(key)) return '<td style="background:#e5e7eb;border:1px solid #cbd5e1;text-align:center">锁定</td>';
+          const list = entries.filter(e => Number(e.day) === day.day && e.periodId === p.id);
+          if (!list.length) return '<td style="border:1px solid #cbd5e1;background:' + (day.day >= 6 ? '#f8fafc' : '#ffffff') + ';padding:' + pad + '"></td>';
+          const hasC = list.some(e => conflictSet.has(e.id));
+          const bg = hasC ? '#fef2f2' : day.day >= 6 ? '#f8fafc' : '#ffffff';
+          const text = list.map(e => getDisplayLines(e, scope, teachers).map(esc).join('<br>')).join('<hr>');
+          return '<td style="border:1px solid #cbd5e1;background:' + bg + ';padding:' + pad + ';font-size:' + font + ';vertical-align:top">' + text + '</td>';
+        }).join('');
+        rows += '<tr><td style="border:1px solid #cbd5e1;background:#f8fafc;padding:' + pad + '"><b>' + esc(p.name) + '</b><br>' + esc(p.startTime + '-' + p.endTime) + '</td>' + cells + '</tr>';
+      }
+      tables += '<h3>' + esc(cls.name) + '</h3><table style="border-collapse:collapse;margin-bottom:18px">' + rows + '</table>';
+    }
+    const html = '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"><style>@page{size:landscape;margin:10mm}td,th{mso-number-format:"\@";}</style></head><body>' + tables + '</body></html>';
+    const blob = new Blob(['\uFEFF' + html], { type: 'application/vnd.ms-excel;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'zhixing-timetable-wysiwyg.xls';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  }
+
   function renderTimetableTab(d) {
     const scope = d.scope;
     const teachers = d.teachers || [];
@@ -115,9 +213,11 @@
     const conflictSet = new Set(conflicts.filter(c => c.hard.length).map(c => c.entryId));
     const toolbar = '<section class="panel panel-pad" style="margin-bottom:16px"><div class="row-between wrap" style="gap:10px">' +
       '<div class="row wrap" style="gap:8px">' +
+      renderOptionsDropdown() +
       '<button type="button" class="btn btn-primary btn-sm" data-sched-action="auto-schedule">⚡ 一键智能排课</button>' +
       '<button type="button" class="btn btn-soft btn-sm" data-sched-action="publish-schedule">📢 发布同步给师生</button>' +
-      '<a class="btn btn-light btn-sm" href="/api/admin/schedule/export" download="zhixing-timetable.csv">⬇ 导出课表 (.csv)</a>' +
+      '<button type="button" class="btn btn-light btn-sm" data-sched-action="export-wysiwyg">⬇ 导出全校总课表 (Excel)</button>' +
+      '<a class="btn btn-light btn-sm" href="/api/admin/schedule/export" download="zhixing-timetable.csv">⬇ CSV</a>' +
       '<button type="button" class="btn btn-light btn-sm" onclick="window.print()">🖨 打印 / 存PDF</button>' +
       '<button type="button" class="btn btn-light btn-sm" data-sched-action="archive-schedule">📦 保存存档</button>' +
       '</div><div class="tiny muted">' + (scope.published ? '已发布：' + fmtDate(scope.published.publishedAt) : '尚未发布给师生') + ' · 共 ' + scope.entries.length + ' 节课 · 冲突 ' + conflictSet.size + ' 项</div></div></section>';
@@ -509,6 +609,8 @@
     if (act === 'reload') { schedUI.error = ''; schedUI.data = null; render(); return; }
     if (act === 'subtab') { schedUI.subTab = btn.dataset.tab; render(); return; }
     if (act === 'view-mode') { schedUI.viewMode = btn.dataset.mode; render(); return; }
+    if (act === 'toggle-options') { schedUI.optionsOpen = !schedUI.optionsOpen; render(); return; }
+    if (act === 'export-wysiwyg' && schedUI.data) { exportWysiwygExcel(schedUI.data); showToast('已按当前界面显示模式导出 Excel 课表'); return; }
     if (act === 'open-add-slot') { schedUI.addSlot = { day: Number(btn.dataset.day), periodId: btn.dataset.period }; render(); return; }
     if (act === 'close-add-slot') { schedUI.addSlot = null; render(); return; }
     if (act === 'close-conflict') { schedUI.conflictModal = null; render(); return; }
@@ -583,6 +685,13 @@
   });
 
   document.addEventListener('change', event => {
+    const prefKey = event.target.dataset?.schedPref;
+    if (prefKey) {
+      schedUI.prefs[prefKey] = event.target.type === 'checkbox' ? event.target.checked : event.target.value;
+      savePrefs(schedUI.prefs);
+      render();
+      return;
+    }
     const sel = event.target.dataset?.schedSelect;
     if (!sel) return;
     if (sel === 'class') schedUI.selectedClassId = event.target.value;
