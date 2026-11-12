@@ -47,10 +47,10 @@ async function main() {
   assert.equal(tch.data.user.studentId, null);
 
   // 3. Admin registration: sch prefix + digits
-  assert.equal((await api('POST', '/api/auth/register-admin', { name: 'Bad Adm', email: 'badadm@example.edu', accountId: 'tch202602', schoolName: 'School X', password: 'Password123!' })).status, 400);
-  const adm = await api('POST', '/api/auth/register-admin', { name: 'Admin One', email: 'adm1@example.edu', accountId: 'SCH20260101', schoolName: 'Zhixing High', schoolCode: 'ZX2026', password: 'Password123!' });
+  assert.equal((await api('POST', '/api/auth/register-admin', { name: 'Bad Adm', email: 'badadm@example.edu', accountId: '199901SIU', schoolName: 'School X', password: 'Password123!' })).status, 400);
+  const adm = await api('POST', '/api/auth/register-admin', { name: 'Admin One', email: 'adm1@example.edu', accountId: 'siu199901', schoolName: 'Zhixing High', schoolCode: 'ZX2026', password: 'Password123!' });
   assert.equal(adm.status, 201);
-  assert.equal(adm.data.user.accountId, 'sch20260101');
+  assert.equal(adm.data.user.accountId, 'SIU199901');
   assert.equal(adm.data.user.role, 'admin');
 
   // 4. Duplicate accountId rejected
@@ -63,7 +63,8 @@ async function main() {
     ['tch202601', 'teacher'],
     ['TCH202601', 'teacher'],
     ['tch1@example.edu', 'teacher'],
-    ['sch20260101', 'admin'],
+    ['SIU199901', 'admin'],
+    ['siu199901', 'admin'],
     ['adm1@example.edu', 'admin'],
   ]) {
     const res = await api('POST', '/api/auth/login', { identifier, password: 'Password123!' });

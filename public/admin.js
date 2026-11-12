@@ -52,8 +52,8 @@
         html = html.replace('Create Your Teaching Workspace', 'Create a School Organization');
         html = html.replace('Create an instructor account, then create courses and share enrollment codes with students.', 'Create your school organization and invite instructors and students with its code or exact name.');
         html = html.replace('Instructor Account ID', 'Administrator Account ID');
-        html = html.replace('For example tch202601', 'For example sch20260101');
-        html = html.replace('Must start with tch followed by digits (e.g. tch202601).', 'Must start with sch followed by digits (e.g. sch20260101).');
+        html = html.replace('For example tch202601', 'For example SIU199901');
+        html = html.replace('Must start with tch followed by digits (e.g. tch202601).', 'Must start with an English letter using uppercase letters and digits (e.g. SIU199901).');
         html = html.replace('<div class="field"><label for="auth-email">Email Address</label>', '<div class="field"><label for="auth-school-name">School / Organization Name</label><input id="auth-school-name" name="schoolName" maxlength="100" placeholder="For example, Peking University" required></div><div class="field"><label for="auth-school-code">School Code (optional)</label><input id="auth-school-code" name="schoolCode" maxlength="16" placeholder="For example, 1008611"><div class="field-hint">Each school and code can only register one administrator account. Leave blank to generate automatically.</div></div><div class="field"><label for="auth-email">Email Address</label>');
         html = html.replace('Create Instructor Account →', 'Create School Administrator Account →');
         html = html.replace('Already have an account?', 'Already have an administrator account?');

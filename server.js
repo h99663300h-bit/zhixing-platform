@@ -521,8 +521,9 @@ async function api(req, res, url) {
       return normalized;
     }
     if (role === 'admin') {
-      if (!/^sch\d{2,24}$/.test(normalized)) fail(400, 'Administrator account ID must start with sch followed by digits (e.g. sch20260101)');
-      return normalized;
+      const upper = value.toUpperCase();
+      if (!/^[A-Z][A-Z0-9]{2,31}$/.test(upper)) fail(400, 'Administrator account ID must start with an English letter and use uppercase letters and digits (e.g. SIU199901)');
+      return upper;
     }
     fail(400, 'Invalid account role');
   }

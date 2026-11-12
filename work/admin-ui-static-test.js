@@ -41,7 +41,7 @@ vm.runInContext("state.authMode='register';state.authRole='admin';render()",ui.c
 assert.match(ui.app.innerHTML,/<select id="auth-role-select"/);
 assert.match(ui.app.innerHTML,/Create a School Organization/);
 assert.match(ui.app.innerHTML,/Administrator Account ID/);
-assert.match(ui.app.innerHTML,/sch20260101/);
+assert.match(ui.app.innerHTML,/SIU199901/);
 assert.match(ui.app.innerHTML,/auth-school-name/);
 assert.match(ui.app.innerHTML,/auth-school-code/);
 vm.runInContext("state.authRole='teacher';render()",ui.context);
