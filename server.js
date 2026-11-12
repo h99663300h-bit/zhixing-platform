@@ -158,8 +158,11 @@ function getUser(req) {
 function publicUser(user) {
   if (!user) return null;
   const school = db.schools.find(item => item.id === user.schoolId);
-  return { id: user.id, role: user.role, name: user.name, email: user.email, studentId: user.studentId, accountId: user.accountId || user.studentId || null, gender: user.gender || '', grade: user.grade || '', active: user.active !== false,
-    school: school ? { id: school.id, name: school.name, code: school.code } : null, avatarUrl: user.avatarFile ? '/api/profile/avatar/' + encodeURIComponent(user.id) : '' };
+  const pendingSchool = user.pendingSchoolId ? db.schools.find(item => item.id === user.pendingSchoolId) : null;
+  return { id: user.id, role: user.role, name: user.name, email: user.email, studentId: user.studentId, accountId: user.accountId || user.studentId || null, gender: user.gender || '', grade: user.grade || '', department: user.department || '', major: user.major || '', active: user.active !== false,
+    school: school ? { id: school.id, name: school.name, code: school.code } : null,
+    pendingSchool: pendingSchool ? { id: pendingSchool.id, name: pendingSchool.name, code: pendingSchool.code } : null,
+    avatarUrl: user.avatarFile ? '/api/profile/avatar/' + encodeURIComponent(user.id) : '' };
 }
 function requireUser(user) { if (!user) fail(401, 'Please sign in first'); return user; }
 function requireRole(user, role) { requireUser(user); if (user.role !== role) fail(403, 'You do not have permission to perform this action'); return user; }
@@ -461,7 +464,12 @@ async function api(req, res, url) {
     if (user.schoolId) fail(409, 'This account is already linked to a school');
     const school = resolveSchoolFields(body);
     if (!school) fail(400, 'Enter a school code or exact school name');
-    user.schoolId = school.id;
+    if (user.role === 'teacher') {
+      user.pendingSchoolId = school.id;
+      user.pendingSchoolRequestedAt = now();
+    } else {
+      user.schoolId = school.id;
+    }
     save();
     return json(res, 200, { profile: publicUser(user) });
   }
@@ -531,7 +539,12 @@ async function api(req, res, url) {
     if (db.users.some(u => u.email.toLowerCase() === email)) fail(409, 'This email is already registered');
     if (accountIdTaken(accountId)) fail(409, role === 'student' ? 'This student ID is already registered; each student can have only one account' : 'This account ID is already registered');
     const school = resolveSchoolFields(body);
-    const newUser = { id: id('user'), role, name, email, studentId, accountId, schoolId: school?.id || null, passwordHash: hashPassword(body.password), createdAt: now() };
+    const newUser = {
+      id: id('user'), role, name, email, studentId, accountId,
+      schoolId: role === 'teacher' ? null : (school?.id || null),
+      ...(role === 'teacher' && school ? { pendingSchoolId: school.id, pendingSchoolRequestedAt: now() } : {}),
+      passwordHash: hashPassword(body.password), createdAt: now()
+    };
     db.users.push(newUser); save();
     const token = crypto.randomBytes(32).toString('hex');
     sessions.set(crypto.createHash('sha256').update(token).digest('hex'), { userId: newUser.id, expiresAt: Date.now() + SESSION_MS });
@@ -621,6 +634,154 @@ async function api(req, res, url) {
     resetTokens.delete(key); invalidateSessions(target.id); save();
     return json(res, 200, { ok: true });
   }
+  function parseCsvRows(text) {
+    const clean = String(text || '').replace(/^\uFEFF/, '');
+    const rows = [];
+    let row = [], cell = '', inQuotes = false;
+    for (let i = 0; i < clean.length; i++) {
+      const ch = clean[i], next = clean[i + 1];
+      if (inQuotes) {
+        if (ch === '"' && next === '"') { cell += '"'; i++; }
+        else if (ch === '"') inQuotes = false;
+        else cell += ch;
+      } else if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === ',') {
+        row.push(cell.trim()); cell = '';
+      } else if (ch === '\r' || ch === '\n') {
+        if (ch === '\r' && next === '\n') i++;
+        row.push(cell.trim());
+        if (row.some(Boolean)) rows.push(row);
+        row = []; cell = '';
+      } else {
+        cell += ch;
+      }
+    }
+    row.push(cell.trim());
+    if (row.some(Boolean)) rows.push(row);
+    return rows;
+  }
+  const IMPORT_HEADER_MAP = {
+    '身份信息': 'role', '身份': 'role', '角色': 'role', 'role': 'role',
+    '名字': 'name', '姓名': 'name', 'name': 'name',
+    '性别': 'gender', 'gender': 'gender',
+    '学号': 'studentId', 'studentid': 'studentId', 'student_id': 'studentId',
+    '学校代码': 'schoolCode', 'schoolcode': 'schoolCode', 'school_code': 'schoolCode',
+    '院系': 'department', '学院': 'department', 'department': 'department',
+    '专业': 'major', 'major': 'major',
+    '账号': 'accountId', 'accountid': 'accountId', 'account_id': 'accountId', 'account': 'accountId',
+    '临时密码': 'password', '密码': 'password', 'password': 'password',
+    '邮箱': 'email', 'email': 'email',
+  };
+  if (pathname === '/api/admin/import/template' && method === 'GET') {
+    requireAdmin(user);
+    const targetRole = url.searchParams.get('role') === 'teacher' ? 'teacher' : 'student';
+    const adminSchool = user.schoolId ? db.schools.find(s => s.id === user.schoolId) : null;
+    const sampleCode = adminSchool?.code || '1008611';
+    const csv = targetRole === 'student'
+      ? '\uFEFF身份信息,名字,性别,学号,学校代码,院系,专业,账号,临时密码\r\n' +
+        `student,张三,男,20260101,${sampleCode},计算机学院,软件工程,20260101,Pass202601!\r\n`
+      : '\uFEFF身份信息,名字,性别,学校代码,院系,专业,账号,临时密码\r\n' +
+        `teacher,李老师,女,${sampleCode},计算机学院,人工智能,tch202601,Pass202601!\r\n`;
+    const filename = targetRole === 'student' ? 'student-import-template.csv' : 'teacher-import-template.csv';
+    res.writeHead(200, {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Cache-Control': 'no-store',
+    });
+    res.end(csv);
+    return;
+  }
+  if (pathname === '/api/admin/import' && method === 'POST') {
+    requireAdmin(user);
+    const targetRole = body.role === 'teacher' ? 'teacher' : body.role === 'student' ? 'student' : fail(400, 'Invalid import role');
+    const rows = parseCsvRows(body.csv);
+    if (rows.length < 2) fail(400, 'CSV file must include a header row and at least one data row');
+    const keys = rows[0].map(h => IMPORT_HEADER_MAP[h.toLowerCase()] || IMPORT_HEADER_MAP[h] || '');
+    const requiredKeys = targetRole === 'student' ? ['role', 'name', 'studentId', 'password'] : ['role', 'name', 'accountId', 'password'];
+    for (const reqKey of requiredKeys) {
+      if (!keys.includes(reqKey)) fail(400, `Missing required column: ${reqKey}`);
+    }
+    const adminSchool = user.schoolId ? db.schools.find(s => s.id === user.schoolId) : null;
+    const errors = [];
+    const staged = [];
+    const seenAccountIds = new Set();
+    const seenEmails = new Set();
+    for (let idx = 1; idx < rows.length; idx++) {
+      const rawRow = rows[idx];
+      const rec = {};
+      keys.forEach((k, colIdx) => { if (k) rec[k] = rawRow[colIdx] ?? ''; });
+      const rowNum = idx + 1;
+      try {
+        const rowRole = String(rec.role || '').trim().toLowerCase();
+        const normalizedRole = rowRole === '学生' ? 'student' : (rowRole === '老师' || rowRole === '教师') ? 'teacher' : rowRole;
+        if (normalizedRole !== targetRole) throw new Error(`Role must be "${targetRole}"`);
+        const name = safeText(rec.name, 'Name', 60);
+        const gender = safeText(rec.gender ?? '', 'Gender', 30, false);
+        const department = safeText(rec.department ?? '', 'Department', 80, false);
+        const major = safeText(rec.major ?? '', 'Major', 80, false);
+        let school = adminSchool;
+        const codeInput = String(rec.schoolCode || '').trim();
+        if (codeInput) {
+          const resolved = resolveSchool(codeInput);
+          if (!isGlobalAdmin(user) && resolved.id !== user.schoolId) {
+            throw new Error(`School code "${codeInput}" does not match your school`);
+          }
+          school = resolved;
+        }
+        let studentId = null;
+        let accountId = null;
+        if (targetRole === 'student') {
+          studentId = validateRoleAccountId('student', rec.studentId);
+          const rawAcct = String(rec.accountId || '').trim();
+          if (rawAcct && rawAcct !== studentId) {
+            throw new Error('Student accountId must match studentId');
+          }
+          accountId = studentId;
+        } else {
+          accountId = validateRoleAccountId('teacher', rec.accountId);
+        }
+        if (accountIdTaken(accountId) || seenAccountIds.has(accountId.toLowerCase())) {
+          throw new Error(`Account ID "${accountId}" is already registered or duplicated`);
+        }
+        const password = String(rec.password || '');
+        if (password.length < 8 || password.length > 128) {
+          throw new Error('Temporary password must contain 8–128 characters');
+        }
+        let email = String(rec.email || '').trim().toLowerCase();
+        if (email) {
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error(`Invalid email "${email}"`);
+          if (db.users.some(u => u.email.toLowerCase() === email) || seenEmails.has(email)) {
+            throw new Error(`Email "${email}" is already registered or duplicated`);
+          }
+        } else {
+          const domain = (school?.code || 'zhixing').toLowerCase().replace(/[^a-z0-9-]/g, '') + '.local';
+          email = `${accountId.toLowerCase()}@${domain}`;
+          let suffix = 1;
+          while (db.users.some(u => u.email.toLowerCase() === email) || seenEmails.has(email)) {
+            email = `${accountId.toLowerCase()}_${suffix++}@${domain}`;
+          }
+        }
+        seenAccountIds.add(accountId.toLowerCase());
+        seenEmails.add(email);
+        staged.push({
+          id: id('user'), role: targetRole, name, email, studentId, accountId,
+          gender, department, major,
+          schoolId: school?.id || null,
+          passwordHash: hashPassword(password),
+          active: true, createdAt: now(),
+        });
+      } catch (err) {
+        errors.push({ row: rowNum, message: err.message });
+      }
+    }
+    if (errors.length) {
+      return json(res, 400, { error: `Import failed on ${errors.length} row(s): Row ${errors[0].row}: ${errors[0].message}`, errors });
+    }
+    db.users.push(...staged);
+    save();
+    return json(res, 201, { importedCount: staged.length, users: staged.map(publicUser) });
+  }
   if (pathname === '/api/admin/overview' && method === 'GET') {
     requireAdmin(user);
     const organization = db.schools.find(school => school.id === user.schoolId) || null;
@@ -630,7 +791,24 @@ async function api(req, res, url) {
     const courseIds = new Set(courses.map(course => course.id));
     const students = db.users.filter(u => u.role === 'student' && canAdminManage(user, u)).map(u => ({ ...publicUser(u), enrollments: db.enrollments.filter(e => e.userId === u.id && courseIds.has(e.courseId)).map(e => { const course = db.courses.find(c => c.id === e.courseId); return course ? { courseId: course.id, courseTitle: course.title, teacherName: db.users.find(t => t.id === course.teacherId)?.name || 'Instructor' } : null; }).filter(Boolean) }));
     const organizations = isGlobalAdmin(user) ? db.schools.map(school => ({ id: school.id, name: school.name, code: school.code })) : organization ? [{ id: organization.id, name: organization.name, code: organization.code }] : [];
-    return json(res, 200, { organization: organization ? { id: organization.id, name: organization.name, code: organization.code } : null, organizations, teachers: teachers.map(t => ({ ...publicUser(t), courseCount: db.courses.filter(c => c.teacherId === t.id).length })), students, courses, stats: { teachers: teachers.length, students: students.length, courses: courses.length } });
+    const pendingTeachers = db.users
+      .filter(u => u.role === 'teacher' && u.active !== false && u.pendingSchoolId && (isGlobalAdmin(user) || u.pendingSchoolId === user.schoolId))
+      .map(t => ({ ...publicUser(t), requestedAt: t.pendingSchoolRequestedAt || t.createdAt }));
+    return json(res, 200, { organization: organization ? { id: organization.id, name: organization.name, code: organization.code } : null, organizations, teachers: teachers.map(t => ({ ...publicUser(t), courseCount: db.courses.filter(c => c.teacherId === t.id).length })), pendingTeachers, students, courses, stats: { teachers: teachers.length, students: students.length, courses: courses.length, pendingTeachers: pendingTeachers.length } });
+  }
+  let reqMatch = pathname.match(/^\/api\/admin\/teacher-requests\/([^/]+)\/(approve|reject)$/);
+  if (reqMatch && method === 'POST') {
+    requireAdmin(user);
+    const teacher = db.users.find(u => u.id === reqMatch[1] && u.role === 'teacher' && u.active !== false);
+    if (!teacher || !teacher.pendingSchoolId) fail(404, 'Pending school binding request not found');
+    if (!isGlobalAdmin(user) && teacher.pendingSchoolId !== user.schoolId) fail(403, 'You do not have permission to review this request');
+    if (reqMatch[2] === 'approve') {
+      teacher.schoolId = teacher.pendingSchoolId;
+    }
+    delete teacher.pendingSchoolId;
+    delete teacher.pendingSchoolRequestedAt;
+    save();
+    return json(res, 200, { user: publicUser(teacher), ok: true });
   }
   if (pathname === '/api/admin/teachers' && method === 'POST') {
     requireAdmin(user);

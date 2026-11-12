@@ -68,6 +68,11 @@ async function main() {
   assert.equal((await api('POST', '/api/profile/organization', { school: 'Oxford University' }, 'unbound')).status, 409, 'account cannot transfer to another organization');
   assert.equal((await api('GET', '/api/profile', undefined, 'studentA')).data.profile.school.code, '1008611');
 
+  const preOverviewA = expect(await api('GET', '/api/admin/overview', undefined, 'adminA'), 200, 'school A pending overview');
+  assert.deepEqual(preOverviewA.pendingTeachers.map(x => x.id), [teacherA.id]);
+  assert.equal((await api('POST', `/api/admin/teacher-requests/${teacherB.id}/approve`, {}, 'adminA')).status, 403, 'school A admin cannot approve school B request');
+  expect(await api('POST', `/api/admin/teacher-requests/${teacherA.id}/approve`, {}, 'adminA'), 200, 'school A admin approves teacher A');
+  expect(await api('POST', `/api/admin/teacher-requests/${teacherB.id}/approve`, {}, 'adminB'), 200, 'school B admin approves teacher B');
   const overviewA = expect(await api('GET', '/api/admin/overview', undefined, 'adminA'), 200, 'school A overview');
   assert.deepEqual(overviewA.teachers.map(x => x.id), [teacherA.id]);
   assert.deepEqual(new Set(overviewA.students.map(x => x.id)), new Set([studentA.id, unbound.id]));

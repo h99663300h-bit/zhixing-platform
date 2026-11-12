@@ -9,6 +9,8 @@
   let adminError = '';
   let adminTab = 'teachers';
   let adminDialog = null;
+  let teacherFilter = { q: '', department: '', major: '', status: '' };
+  let studentFilter = { q: '', department: '', major: '', gender: '' };
 
   if (resetToken) {
     // Never leave the one-use token visible in browser history after opening the email link.
@@ -43,24 +45,16 @@
     if (state.authMode === 'forgot' || state.authMode === 'reset') return authRecoveryPage();
     let html = originalAuthPage();
     if (state.authMode === 'register') {
-      const start = html.indexOf('<div class="auth-role"');
-      const end = start < 0 ? -1 : html.indexOf('</div>', start);
-      if (end >= 0) {
-        let roleBar = html.slice(start, end);
-        roleBar = roleBar.replace('class="auth-role"', 'class="auth-role" style="grid-template-columns:repeat(3,minmax(0,1fr))"');
-        roleBar = roleBar.replace(/class="[^"]*" data-action="auth-role" data-role="(student|teacher)"/g, (match, role) => match.replace(/class="[^"]*"/, 'class="' + (state.authRole === role ? 'active' : '') + '"'));
-        roleBar += '<button type="button" class="' + (state.authRole === 'admin' ? 'active' : '') + '" data-action="auth-role" data-role="admin">⚙ Administrator</button>';
-        html = html.slice(0, start) + roleBar + html.slice(end);
-      }
+      html = html.replace('</select>', '<option value="admin"' + (state.authRole === 'admin' ? ' selected' : '') + '>⚙ Administrator</option></select>');
       if (state.authRole !== 'admin') {
-        html = html.replace('<div class="field"><label for="auth-email">Email Address</label>', '<div class="field"><label for="auth-school">School / Organization (optional)</label><input id="auth-school" name="school" maxlength="100" placeholder="Enter a school code or exact school name"><div class="field-hint">For example: 1008611 or Peking University. You can join later from your profile.</div></div><div class="field"><label for="auth-email">Email Address</label>');
+        const schoolHint = state.authRole === 'teacher' ? 'Instructor school binding requires administrator approval. Leave blank to join later.' : 'For example: 1008611 or Peking University. You can join later from your profile.'; html = html.replace('<div class="field"><label for="auth-email">Email Address</label>', '<div class="field"><label for="auth-school">School / Organization (optional)</label><input id="auth-school" name="school" maxlength="100" placeholder="Enter a school code or exact school name"><div class="field-hint">' + schoolHint + '</div></div><div class="field"><label for="auth-email">Email Address</label>');
       } else {
         html = html.replace('Create Your Teaching Workspace', 'Create a School Organization');
         html = html.replace('Create an instructor account, then create courses and share enrollment codes with students.', 'Create your school organization and invite instructors and students with its code or exact name.');
         html = html.replace('Instructor Account ID', 'Administrator Account ID');
         html = html.replace('For example tch202601', 'For example sch20260101');
         html = html.replace('Must start with tch followed by digits (e.g. tch202601).', 'Must start with sch followed by digits (e.g. sch20260101).');
-        html = html.replace('<div class="field"><label for="auth-email">Email Address</label>', '<div class="field"><label for="auth-school-name">School / Organization Name</label><input id="auth-school-name" name="schoolName" maxlength="100" placeholder="For example, Peking University" required></div><div class="field"><label for="auth-school-code">School Code (optional)</label><input id="auth-school-code" name="schoolCode" maxlength="16" placeholder="For example, 1008611"><div class="field-hint">Leave blank to generate a code automatically.</div></div><div class="field"><label for="auth-email">Email Address</label>');
+        html = html.replace('<div class="field"><label for="auth-email">Email Address</label>', '<div class="field"><label for="auth-school-name">School / Organization Name</label><input id="auth-school-name" name="schoolName" maxlength="100" placeholder="For example, Peking University" required></div><div class="field"><label for="auth-school-code">School Code (optional)</label><input id="auth-school-code" name="schoolCode" maxlength="16" placeholder="For example, 1008611"><div class="field-hint">Each school and code can only register one administrator account. Leave blank to generate automatically.</div></div><div class="field"><label for="auth-email">Email Address</label>');
         html = html.replace('Create Instructor Account →', 'Create School Administrator Account →');
         html = html.replace('Already have an account?', 'Already have an administrator account?');
       }
@@ -85,27 +79,89 @@
     });
   }
 
+  function uniqueValues(items, key) {
+    return [...new Set((items || []).map(x => String(x[key] || '').trim()).filter(Boolean))].sort();
+  }
+  function matchesQuery(item, q) {
+    if (!q) return true;
+    const hay = [item.name, item.accountId, item.studentId, item.email, item.department, item.major, item.school?.name, item.school?.code].filter(Boolean).join(' ').toLowerCase();
+    return hay.includes(q.toLowerCase());
+  }
+
   function instructorTable() {
-    const teachers = adminData?.teachers || [];
-    const rows = teachers.map(t => '<tr><td><strong>' + esc(t.name) + '</strong><br><span class="muted">' + esc(t.email) + '</span></td><td>' + esc(t.school?.name || 'Unassigned') + '</td>' +
+    const allTeachers = adminData?.teachers || [];
+    const pending = adminData?.pendingTeachers || [];
+    const depts = uniqueValues(allTeachers, 'department');
+    const majors = uniqueValues(allTeachers, 'major');
+    const teachers = allTeachers.filter(t => {
+      if (!matchesQuery(t, teacherFilter.q)) return false;
+      if (teacherFilter.department && (t.department || '') !== teacherFilter.department) return false;
+      if (teacherFilter.major && (t.major || '') !== teacherFilter.major) return false;
+      if (teacherFilter.status === 'active' && !t.active) return false;
+      if (teacherFilter.status === 'inactive' && t.active) return false;
+      return true;
+    });
+    const pendingSection = pending.length
+      ? '<section class="panel" style="margin-bottom:20px"><div class="panel-pad"><h2>Pending School Binding Requests <span class="pill blue">' + pending.length + '</span></h2>' +
+        '<p class="small muted">Review instructors who requested to bind their account to a school code.</p></div>' +
+        '<div class="table-wrap"><table class="data-table"><thead><tr><th>Instructor</th><th>Account ID</th><th>Requested School</th><th>Actions</th></tr></thead><tbody>' +
+        pending.map(t => '<tr><td><strong>' + esc(t.name) + '</strong><br><span class="muted">' + esc(t.email) + '</span></td><td>' + esc(t.accountId || '—') +
+          '</td><td><strong>' + esc(t.pendingSchool?.name || '') + '</strong><br><span class="muted">Code: ' + esc(t.pendingSchool?.code || '') + '</span></td>' +
+          '<td><div class="row wrap"><button type="button" class="btn btn-primary btn-sm" data-admin-action="approve-teacher" data-id="' + esc(t.id) + '">Approve</button>' +
+          '<button type="button" class="btn btn-danger btn-sm" data-admin-action="reject-teacher" data-id="' + esc(t.id) + '">Reject</button></div></td></tr>').join('') +
+        '</tbody></table></div></section>'
+      : '';
+    const importSection = '<section class="panel panel-pad" style="margin-bottom:20px"><div class="row-between wrap"><div><h2>Bulk Import Instructors</h2>' +
+      '<p class="small muted">Download the CSV template, fill in instructor rows (role, name, gender, schoolCode, department, major, accountId, password), and import directly.</p></div>' +
+      '<a class="btn btn-light btn-sm" href="/api/admin/import/template?role=teacher" download="teacher-import-template.csv">⬇ Download Teacher Template (.csv)</a></div>' +
+      '<form id="admin-import-teacher-form" style="margin-top:12px"><div class="row wrap">' +
+      '<input id="admin-import-teacher-file" type="file" accept=".csv,text/csv" required>' +
+      '<button type="submit" class="btn btn-primary btn-sm">Import Instructor Roster</button></div></form></section>';
+    const filterBar = '<div class="filter-line" style="padding:0 20px 14px"><div class="searchbar"><span>⌕</span><input id="teacher-filter-q" data-admin-filter="teacher-q" type="search" value="' + esc(teacherFilter.q) + '" placeholder="Search name, account ID, email, department, major"></div>' +
+      '<div class="row wrap"><select data-admin-filter="teacher-department" aria-label="Filter by department"><option value="">All Departments</option>' + depts.map(d => '<option value="' + esc(d) + '"' + (teacherFilter.department === d ? ' selected' : '') + '>' + esc(d) + '</option>').join('') + '</select>' +
+      '<select data-admin-filter="teacher-major" aria-label="Filter by major"><option value="">All Majors</option>' + majors.map(m => '<option value="' + esc(m) + '"' + (teacherFilter.major === m ? ' selected' : '') + '>' + esc(m) + '</option>').join('') + '</select>' +
+      '<select data-admin-filter="teacher-status" aria-label="Filter by status"><option value="">All Statuses</option><option value="active"' + (teacherFilter.status === 'active' ? ' selected' : '') + '>Active</option><option value="inactive"' + (teacherFilter.status === 'inactive' ? ' selected' : '') + '>Inactive</option></select></div></div>';
+    const rows = teachers.map(t => '<tr><td><strong>' + esc(t.name) + '</strong>' + (t.gender ? ' <span class="tiny muted">(' + esc(t.gender) + ')</span>' : '') + '<br><span class="muted">' + esc(t.email) + '</span></td>' +
+      '<td>' + esc(t.accountId || '—') + '</td><td>' + esc(t.school?.name || 'Unassigned') + '</td>' +
+      '<td>' + esc([t.department, t.major].filter(Boolean).join(' · ') || '—') + '</td>' +
       '<td>' + (t.active ? '<span class="pill green">Active</span>' : '<span class="pill gray">Inactive</span>') + '</td><td>' + n(t.courseCount) + '</td><td>' +
       (t.active ? '<div class="row wrap"><button type="button" class="btn btn-soft btn-sm" data-admin-action="password" data-id="' + esc(t.id) + '" data-role="teacher">Reset Password</button>' +
       '<button type="button" class="btn btn-danger btn-sm" data-admin-action="remove-teacher" data-id="' + esc(t.id) + '">Deactivate</button></div>' : '—') + '</td></tr>').join('');
-    return '<section class="panel panel-pad" style="margin-bottom:20px"><h2>Add an Instructor</h2><p class="small muted">Create a separate login for each instructor.</p>' +
+    return pendingSection + importSection + '<section class="panel panel-pad" style="margin-bottom:20px"><h2>Add an Instructor</h2><p class="small muted">Create a separate login for each instructor.</p>' +
       '<form id="admin-add-teacher"><div class="form-grid"><div class="field"><label for="admin-teacher-name">Name</label><input id="admin-teacher-name" name="name" required maxlength="60"></div>' +
       '<div class="field"><label for="admin-teacher-email">Email</label><input id="admin-teacher-email" name="email" type="email" placeholder="teacher@example.com" required></div>' +
       '<div class="field"><label for="admin-teacher-password">Temporary Password</label><input id="admin-teacher-password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></div></div>' +
       '<button type="submit" class="btn btn-primary">Create Instructor Account</button></form></section>' +
-      '<section class="panel"><div class="panel-pad"><h2>Instructor Accounts</h2><p class="small muted">Deactivate an account to prevent sign-in while retaining its courses and records.</p></div>' +
-      '<div class="table-wrap"><table class="data-table"><thead><tr><th>Instructor</th><th>School</th><th>Status</th><th>Courses</th><th>Actions</th></tr></thead><tbody>' +
-      (rows || '<tr><td colspan="5">No instructor accounts yet.</td></tr>') + '</tbody></table></div></section>';
+      '<section class="panel"><div class="panel-pad"><h2>Instructor Accounts <span class="pill blue">' + teachers.length + ' / ' + allTeachers.length + '</span></h2><p class="small muted">Deactivate an account to prevent sign-in while retaining its courses and records.</p></div>' +
+      filterBar + '<div class="table-wrap"><table class="data-table"><thead><tr><th>Instructor</th><th>Account ID</th><th>School</th><th>Dept / Major</th><th>Status</th><th>Courses</th><th>Actions</th></tr></thead><tbody>' +
+      (rows || '<tr><td colspan="7">No matching instructor accounts.</td></tr>') + '</tbody></table></div></section>';
   }
 
   function studentTable() {
-    const students = adminData?.students || [];
+    const allStudents = adminData?.students || [];
     const courses = adminData?.courses || [];
-    if (!students.length) return em('No students yet', 'Students will appear here after registering.');
-    return students.map(s => {
+    const depts = uniqueValues(allStudents, 'department');
+    const majors = uniqueValues(allStudents, 'major');
+    const genders = uniqueValues(allStudents, 'gender');
+    const students = allStudents.filter(s => {
+      if (!matchesQuery(s, studentFilter.q)) return false;
+      if (studentFilter.department && (s.department || '') !== studentFilter.department) return false;
+      if (studentFilter.major && (s.major || '') !== studentFilter.major) return false;
+      if (studentFilter.gender && (s.gender || '') !== studentFilter.gender) return false;
+      return true;
+    });
+    const importSection = '<section class="panel panel-pad" style="margin-bottom:20px"><div class="row-between wrap"><div><h2>Bulk Import Students</h2>' +
+      '<p class="small muted">Download the CSV template, fill in student rows (role, name, gender, studentId, schoolCode, department, major, accountId, password), and import to auto-register accounts.</p></div>' +
+      '<a class="btn btn-light btn-sm" href="/api/admin/import/template?role=student" download="student-import-template.csv">⬇ Download Student Template (.csv)</a></div>' +
+      '<form id="admin-import-student-form" style="margin-top:12px"><div class="row wrap">' +
+      '<input id="admin-import-student-file" type="file" accept=".csv,text/csv" required>' +
+      '<button type="submit" class="btn btn-primary btn-sm">Import Student Roster</button></div></form></section>';
+    const filterBar = '<div class="filter-line" style="margin-bottom:16px"><div class="searchbar"><span>⌕</span><input id="student-filter-q" data-admin-filter="student-q" type="search" value="' + esc(studentFilter.q) + '" placeholder="Search name, student ID, email, department, major"></div>' +
+      '<div class="row wrap"><select data-admin-filter="student-department" aria-label="Filter by department"><option value="">All Departments</option>' + depts.map(d => '<option value="' + esc(d) + '"' + (studentFilter.department === d ? ' selected' : '') + '>' + esc(d) + '</option>').join('') + '</select>' +
+      '<select data-admin-filter="student-major" aria-label="Filter by major"><option value="">All Majors</option>' + majors.map(m => '<option value="' + esc(m) + '"' + (studentFilter.major === m ? ' selected' : '') + '>' + esc(m) + '</option>').join('') + '</select>' +
+      '<select data-admin-filter="student-gender" aria-label="Filter by gender"><option value="">All Genders</option>' + genders.map(g => '<option value="' + esc(g) + '"' + (studentFilter.gender === g ? ' selected' : '') + '>' + esc(g) + '</option>').join('') + '</select></div></div>';
+    if (!allStudents.length) return importSection + em('No students yet', 'Students will appear here after registering or importing.');
+    const cards = students.length ? students.map(s => {
       const enrolled = new Set((s.enrollments || []).map(e => e.courseId));
       const list = (s.enrollments || []).map(e => '<div class="student-detail-row"><span><strong>' + esc(e.courseTitle) + '</strong> · ' + esc(e.teacherName || 'Instructor') + '</span>' +
         '<button class="btn btn-danger btn-sm" type="button" data-admin-action="remove-enrollment" data-student-id="' + esc(s.id) + '" data-course-id="' + esc(e.courseId) + '">Remove</button></div>').join('');
@@ -113,11 +169,13 @@
       const options = available.map(c => '<option value="' + esc(c.id) + '">' + esc(c.title) + ' · ' + esc(c.teacherName || 'Instructor') + '</option>').join('');
       const addForm = available.length ? '<form class="admin-enrollment-form" data-student-id="' + esc(s.id) + '"><div class="row wrap"><select name="courseId" aria-label="Course to add" required>' + options +
         '</select><button class="btn btn-soft btn-sm" type="submit">Add to Course</button></div></form>' : '<p class="small muted">Enrolled in every available course.</p>';
+      const metaParts = [s.email, 'Student ID ' + (s.studentId || 'N/A'), s.gender, [s.department, s.major].filter(Boolean).join(' · '), s.school?.name || 'Unassigned'].filter(Boolean);
       return '<section class="panel panel-pad" style="margin-bottom:16px"><div class="row-between"><div><h2 style="margin:0 0 5px">' + esc(s.name) + '</h2><p class="small muted" style="margin:0">' +
-        esc(s.email) + ' · Student ID ' + esc(s.studentId || 'N/A') + ' · ' + esc(s.school?.name || 'Unassigned') + '</p></div><button class="btn btn-soft btn-sm" type="button" data-admin-action="password" data-id="' + esc(s.id) +
+        esc(metaParts.join(' · ')) + '</p></div><button class="btn btn-soft btn-sm" type="button" data-admin-action="password" data-id="' + esc(s.id) +
         '" data-role="student">Reset Password</button></div><div class="student-detail">' + (list || '<p class="small muted">No enrolled courses.</p>') + '</div>' +
         '<div style="margin-top:16px"><strong class="small">Adjust Course Enrollment</strong>' + addForm + '</div></section>';
-    }).join('');
+    }).join('') : em('No matching students', 'Try adjusting your search or filter criteria.');
+    return importSection + filterBar + cards;
   }
 
   function passwordDialog() {
@@ -146,7 +204,7 @@
         stat('Courses', n(s.courses), 'Courses across instructors', '▤') + '</div>' + (adminTab === 'teachers' ? instructorTable() : studentTable());
     return '<div class="mobile-overlay ' + (state.mobileOpen ? 'show' : '') + '" data-admin-action="close-menu"></div><div class="app-shell"><aside class="sidebar ' +
       (state.mobileOpen ? 'open' : '') + '">' + brand() + '<div class="sidebar-label">' + scopeLabel + '</div><nav class="nav-list" aria-label="Administrator Menu">' +
-      '<button type="button" class="nav-btn ' + (adminTab === 'teachers' ? 'active' : '') + '" data-admin-action="tab" data-tab="teachers"><span class="ico">♧</span>Instructors</button>' +
+      '<button type="button" class="nav-btn ' + (adminTab === 'teachers' ? 'active' : '') + '" data-admin-action="tab" data-tab="teachers"><span class="ico">♧</span>Instructors' + ((adminData?.pendingTeachers?.length || 0) ? '<span class="nav-count">' + adminData.pendingTeachers.length + '</span>' : '') + '</button>' +
       '<button type="button" class="nav-btn ' + (adminTab === 'students' ? 'active' : '') + '" data-admin-action="tab" data-tab="students"><span class="ico">▣</span>Students</button></nav>' +
       '<div class="sidebar-bottom"><div class="side-user"><span class="avatar sm">' + initials(state.user?.name) + '</span><span class="side-user-text"><strong>' + esc(state.user?.name) +
       '</strong><small>' + (organization ? 'School Administrator' : 'Site Administrator') + '</small></span><button class="icon-btn" type="button" data-admin-action="logout" aria-label="Sign Out" title="Sign Out">↪</button></div></div></aside>' +
@@ -200,6 +258,16 @@
       if (person) { adminDialog = {id:person.id,name:person.name,role:button.dataset.role}; render(); }
       return;
     }
+    if (action === 'approve-teacher' || action === 'reject-teacher') {
+      const verb = action === 'approve-teacher' ? 'approve' : 'reject';
+      run(async () => {
+        await api('/api/admin/teacher-requests/' + encodeURIComponent(button.dataset.id) + '/' + verb, {method:'POST'});
+        adminData = await api('/api/admin/overview');
+        render();
+        showToast(verb === 'approve' ? 'Instructor approved and linked to school' : 'Request declined');
+      }, 'Could not update request: ');
+      return;
+    }
     if (action === 'remove-teacher') {
       const teacher = (adminData?.teachers || []).find(t => t.id === button.dataset.id);
       if (!teacher || !confirm('Deactivate ' + teacher.name + '? They will no longer be able to sign in. Their courses and student records will be kept.')) return;
@@ -237,7 +305,7 @@
 
   document.addEventListener('submit', event => {
     const form = event.target;
-    if (!['admin-reset-request','admin-reset-confirm','admin-add-teacher','admin-password-form'].includes(form.id) && !form.classList.contains('admin-enrollment-form')) return;
+    if (!['admin-reset-request','admin-reset-confirm','admin-add-teacher','admin-password-form','admin-import-student-form','admin-import-teacher-form'].includes(form.id) && !form.classList.contains('admin-enrollment-form')) return;
     event.preventDefault();
     const values = Object.fromEntries(new FormData(form));
     if (form.id === 'admin-reset-request') {
@@ -260,6 +328,20 @@
       return;
     }
     if (state.user?.role !== 'admin') return;
+    if (form.id === 'admin-import-student-form' || form.id === 'admin-import-teacher-form') {
+      const role = form.id === 'admin-import-student-form' ? 'student' : 'teacher';
+      const fileInput = form.querySelector('input[type="file"]');
+      const file = fileInput?.files?.[0];
+      if (!file) { showToast('Please choose a CSV file first', true); return; }
+      run(async () => {
+        const csv = await file.text();
+        const result = await api('/api/admin/import', { method: 'POST', body: JSON.stringify({ role, csv }) });
+        adminData = await api('/api/admin/overview');
+        render();
+        showToast('Imported ' + n(result.importedCount) + ' ' + role + ' account(s)');
+      }, 'Import failed: ');
+      return;
+    }
     if (form.id === 'admin-add-teacher') {
       run(async () => {
         await api('/api/admin/teachers', {method:'POST',body:JSON.stringify({name:values.name,email:values.email,password:values.password})});
@@ -284,5 +366,31 @@
         adminData = await api('/api/admin/overview'); render(); showToast('Student added to course');
       }, 'Could not update enrollment: ');
     }
+  });
+
+  function applyAdminFilter(el, refocus) {
+    const key = el.dataset.adminFilter;
+    const val = el.value;
+    if (key === 'teacher-q') teacherFilter.q = val;
+    else if (key === 'teacher-department') teacherFilter.department = val;
+    else if (key === 'teacher-major') teacherFilter.major = val;
+    else if (key === 'teacher-status') teacherFilter.status = val;
+    else if (key === 'student-q') studentFilter.q = val;
+    else if (key === 'student-department') studentFilter.department = val;
+    else if (key === 'student-major') studentFilter.major = val;
+    else if (key === 'student-gender') studentFilter.gender = val;
+    const pos = refocus ? el.selectionStart : null;
+    const id = el.id;
+    render();
+    if (refocus && id) {
+      const nextEl = document.getElementById(id);
+      if (nextEl) { nextEl.focus(); if (pos != null) nextEl.setSelectionRange(pos, pos); }
+    }
+  }
+  document.addEventListener('input', event => {
+    if (event.target.dataset?.adminFilter && event.target.type === 'search') applyAdminFilter(event.target, true);
+  });
+  document.addEventListener('change', event => {
+    if (event.target.dataset?.adminFilter && event.target.tagName === 'SELECT') applyAdminFilter(event.target, false);
   });
 })();

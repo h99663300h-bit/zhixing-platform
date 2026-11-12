@@ -38,6 +38,7 @@ assert.doesNotMatch(html,/Student Portal|Instructor Portal|Admin Portal/);
 assert.match(html,/Forgot password\?/);
 assert.match(html,/you@example\.com/);
 vm.runInContext("state.authMode='register';state.authRole='admin';render()",ui.context);
+assert.match(ui.app.innerHTML,/<select id="auth-role-select"/);
 assert.match(ui.app.innerHTML,/Create a School Organization/);
 assert.match(ui.app.innerHTML,/Administrator Account ID/);
 assert.match(ui.app.innerHTML,/sch20260101/);
