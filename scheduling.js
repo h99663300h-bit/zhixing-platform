@@ -38,6 +38,9 @@ function emptyScope() {
     swapRequests: [],
     auditLogs: [],
     archives: [],
+    combinedGroups: [],
+    placement: { students: [], config: { classCount: 4, classPrefix: '新生', mode: 'total', genderBalance: true }, result: null },
+    exams: [],
   };
 }
 
@@ -48,7 +51,9 @@ function ensureScope(db, scopeKey) {
   if (!s.settings) s.settings = emptyScope().settings;
   if (!Array.isArray(s.settings.periods) || !s.settings.periods.length) s.settings.periods = defaultPeriods();
   if (!Array.isArray(s.settings.blockedSlots)) s.settings.blockedSlots = [];
-  for (const k of ['grades', 'classes', 'subjects', 'rooms', 'plans', 'entries', 'swapRequests', 'auditLogs', 'archives']) {
+  if (!s.placement || typeof s.placement !== 'object') s.placement = { students: [], config: { classCount: 4, classPrefix: '新生', mode: 'total', genderBalance: true }, result: null };
+  if (!Array.isArray(s.placement.students)) s.placement.students = [];
+  for (const k of ['grades', 'classes', 'subjects', 'rooms', 'plans', 'entries', 'swapRequests', 'auditLogs', 'archives', 'combinedGroups', 'exams']) {
     if (!Array.isArray(s[k])) s[k] = [];
   }
   if (!s.teacherRules || typeof s.teacherRules !== 'object') s.teacherRules = {};
@@ -120,6 +125,7 @@ function checkPlacement(scope, candidate, ignoreEntryIds = new Set()) {
   // H01, H02, H05: Uniqueness in entries
   for (const e of scope.entries) {
     if (ignoreEntryIds.has(e.id)) continue;
+    if (candidate.groupId && e.groupId === candidate.groupId) continue;
     if (Number(e.day) !== day || e.periodId !== candidate.periodId) continue;
     if (e.teacherId === candidate.teacherId) {
       const otherCls = scope.classes.find(c => c.id === e.classId)?.name || '其他班级';
@@ -244,7 +250,50 @@ function autoSchedule(scope, options = {}) {
   const unplaced = [];
   let placedCount = 0;
 
+  const groupedPlanIds = new Set((scope.combinedGroups || []).flatMap(g => g.planIds || []));
+  for (const grp of (scope.combinedGroups || [])) {
+    if (gradeFilter && !grp.classIds.some(cid => gradeFilter.has(cid))) continue;
+    const grpPlans = scope.plans.filter(pl => grp.planIds.includes(pl.id));
+    if (!grpPlans.length) continue;
+    const existingCount = scope.entries.filter(e => e.groupId === grp.id && e.classId === grp.classIds[0]).length;
+    let remaining = Math.max(0, Number(grp.weeklyHours || grpPlans[0].weeklyHours || 0) - existingCount);
+    const subj = scope.subjects.find(s => s.id === grp.subjectId);
+    const tr = scope.teacherRules[grp.teacherId] || {};
+    while (remaining > 0) {
+      const candidates = [];
+      for (let day = 1; day <= days; day++) {
+        for (const p of tPeriods) {
+          const checks = grp.classIds.map(cid => checkPlacement(scope, {
+            groupId: grp.id, planId: grpPlans[0].id, classId: cid, subjectId: grp.subjectId,
+            teacherId: grp.teacherId, roomId: grp.roomId || null, day, periodId: p.id,
+          }));
+          if (checks.every(c => c.valid)) {
+            const penalty = checks.reduce((sum, c) => sum + c.warnings.length * 10, 0);
+            candidates.push({ day, periodId: p.id, score: scoreSlot(scope, grpPlans[0], subj, tr, day, p.id) - penalty });
+          }
+        }
+      }
+      if (!candidates.length) {
+        unplaced.push({ groupId: grp.id, classId: grp.classIds[0], subjectId: grp.subjectId, teacherId: grp.teacherId, remaining });
+        break;
+      }
+      candidates.sort((a, b) => b.score - a.score);
+      const best = candidates[0];
+      for (const cid of grp.classIds) {
+        const pl = grpPlans.find(x => x.classId === cid) || grpPlans[0];
+        scope.entries.push({
+          id: id('ent'), groupId: grp.id, planId: pl.id, classId: cid, subjectId: grp.subjectId,
+          teacherId: grp.teacherId, roomId: grp.roomId || null, day: best.day, periodId: best.periodId,
+          locked: false, temporary: false, overrideReason: '', updatedAt: now(),
+        });
+      }
+      remaining--;
+      placedCount += grp.classIds.length;
+    }
+  }
+
   for (const plan of sortedPlans) {
+    if (groupedPlanIds.has(plan.id)) continue;
     const existingCount = scope.entries.filter(e => e.classId === plan.classId && e.subjectId === plan.subjectId && e.teacherId === plan.teacherId).length;
     let remaining = Math.max(0, Number(plan.weeklyHours || 0) - existingCount);
     const subj = scope.subjects.find(s => s.id === plan.subjectId);
@@ -344,8 +393,197 @@ function suggestSubstitutes(scope, allTeachers, day, periodId, subjectId) {
   }).slice(0, 5).map(t => ({ id: t.id, name: t.name, department: t.department || '' }));
 }
 
+
+// --- Module 2: Smart Student Placement (智能分班) ---
+function runSmartPlacement(studentsInput, config = {}) {
+  const students = (studentsInput || []).map((s, idx) => ({
+    ...s,
+    id: s.id || `pstu_${idx + 1}`,
+    gender: String(s.gender || '').trim(),
+    total: Number(s.scores?.total ?? s.total ?? 0),
+    chinese: Number(s.scores?.chinese ?? s.chinese ?? 0),
+    math: Number(s.scores?.math ?? s.math ?? 0),
+    english: Number(s.scores?.english ?? s.english ?? 0),
+    rank: Number(s.rank || 0),
+    specialty: String(s.tags?.specialty ?? s.specialty ?? '').trim(),
+    bindGroup: String(s.bindGroup || '').trim(),
+    mutexGroup: String(s.mutexGroup || '').trim(),
+  }));
+  const classCount = Math.max(1, Math.min(50, Number(config.classCount || 2)));
+  const prefix = String(config.classPrefix || '新生').trim();
+  const mode = config.mode || 'total'; // total | subjects | rankBand | percentTier
+  const genderBalance = config.genderBalance !== false;
+
+  const classes = Array.from({ length: classCount }, (_, i) => ({
+    index: i + 1,
+    name: `${prefix}(${i + 1})班`,
+    students: [],
+    male: 0,
+    female: 0,
+    sumTotal: 0,
+    sumChinese: 0,
+    sumMath: 0,
+    sumEnglish: 0,
+    tagCounts: {},
+    mutexGroups: new Set(),
+  }));
+
+  // Group bound students (twins/siblings) into atomic units
+  const bindMap = new Map();
+  const units = [];
+  for (const stu of students) {
+    if (stu.bindGroup) {
+      if (!bindMap.has(stu.bindGroup)) {
+        const unit = { members: [], avgScore: 0 };
+        bindMap.set(stu.bindGroup, unit);
+        units.push(unit);
+      }
+      bindMap.get(stu.bindGroup).members.push(stu);
+    } else {
+      units.push({ members: [stu], avgScore: stu.total });
+    }
+  }
+  for (const u of units) {
+    u.avgScore = u.members.reduce((s, m) => s + m.total, 0) / u.members.length;
+    u.rank = Math.min(...u.members.map(m => m.rank || 999999));
+  }
+
+  // Sort units according to mode
+  if (mode === 'rankBand') {
+    units.sort((a, b) => a.rank - b.rank || b.avgScore - a.avgScore);
+  } else if (mode === 'subjects') {
+    units.sort((a, b) => {
+      const sa = a.members.reduce((s, m) => s + m.chinese + m.math + m.english + m.total, 0) / a.members.length;
+      const sb = b.members.reduce((s, m) => s + m.chinese + m.math + m.english + m.total, 0) / b.members.length;
+      return sb - sa;
+    });
+  } else {
+    units.sort((a, b) => b.avgScore - a.avgScore);
+  }
+
+  // Serpentine / balanced assignment respecting mutexGroups, gender, tags, and score
+  const isMale = g => /^(男|male|m)$/i.test(g);
+  const isFemale = g => /^(女|female|f)$/i.test(g);
+
+  for (let i = 0; i < units.length; i++) {
+    const unit = units[i];
+    const unitMutex = unit.members.map(m => m.mutexGroup).filter(Boolean);
+    const eligible = classes.filter(c => !unitMutex.some(mg => c.mutexGroups.has(mg)));
+    const pool = eligible.length ? eligible : classes;
+
+    // Score each candidate class (lower cost = better)
+    pool.sort((a, b) => {
+      let costA = a.students.length * 100;
+      let costB = b.students.length * 100;
+      if (genderBalance) {
+        const uMale = unit.members.filter(m => isMale(m.gender)).length;
+        const uFemale = unit.members.filter(m => isFemale(m.gender)).length;
+        costA += uMale * a.male * 35 + uFemale * a.female * 35;
+        costB += uMale * b.male * 35 + uFemale * b.female * 35;
+      }
+      for (const m of unit.members) {
+        if (m.specialty) {
+          costA += (a.tagCounts[m.specialty] || 0) * 40;
+          costB += (b.tagCounts[m.specialty] || 0) * 40;
+        }
+      }
+      const avgA = a.students.length ? a.sumTotal / a.students.length : 0;
+      const avgB = b.students.length ? b.sumTotal / b.students.length : 0;
+      costA += avgA * 0.2;
+      costB += avgB * 0.2;
+      return costA - costB || a.index - b.index;
+    });
+
+    const target = pool[0];
+    for (const m of unit.members) {
+      target.students.push(m);
+      if (isMale(m.gender)) target.male++;
+      else if (isFemale(m.gender)) target.female++;
+      target.sumTotal += m.total;
+      target.sumChinese += m.chinese;
+      target.sumMath += m.math;
+      target.sumEnglish += m.english;
+      if (m.specialty) target.tagCounts[m.specialty] = (target.tagCounts[m.specialty] || 0) + 1;
+      if (m.mutexGroup) target.mutexGroups.add(m.mutexGroup);
+    }
+  }
+
+  return classes.map(c => ({
+    name: c.name,
+    count: c.students.length,
+    male: c.male,
+    female: c.female,
+    avgTotal: c.students.length ? Number((c.sumTotal / c.students.length).toFixed(2)) : 0,
+    avgChinese: c.students.length ? Number((c.sumChinese / c.students.length).toFixed(2)) : 0,
+    avgMath: c.students.length ? Number((c.sumMath / c.students.length).toFixed(2)) : 0,
+    avgEnglish: c.students.length ? Number((c.sumEnglish / c.students.length).toFixed(2)) : 0,
+    tagCounts: c.tagCounts,
+    students: c.students,
+  }));
+}
+
+// --- Module 3: Exam Proctoring Auto-Scheduler (自动排监考) ---
+function autoAssignProctors(scope, exam, allTeachers) {
+  const rules = exam.rules || { taughtClass: 'avoid', taughtSubject: 'avoid', proctorsPerRoom: 1 };
+  const perRoom = Math.max(1, Math.min(3, Number(rules.proctorsPerRoom || 1)));
+  const poolIds = Array.isArray(exam.teacherIds) && exam.teacherIds.length ? exam.teacherIds : allTeachers.filter(t => t.active !== false).map(t => t.id);
+  const dutyCount = new Map(poolIds.map(tid => [tid, 0]));
+  const assignments = [];
+  const warnings = [];
+
+  for (const slot of (exam.slots || [])) {
+    const busyInSlot = new Set();
+    // Exclude teachers who are teaching a class at this day/periodId
+    if (slot.dayOfWeek && slot.periodId) {
+      for (const e of scope.entries) {
+        if (Number(e.day) === Number(slot.dayOfWeek) && e.periodId === slot.periodId) {
+          busyInSlot.add(e.teacherId);
+        }
+      }
+    }
+
+    for (const room of (exam.rooms || [])) {
+      const picked = [];
+      const roomWarnings = [];
+      for (let k = 0; k < perRoom; k++) {
+        const candidates = poolIds.filter(tid => !busyInSlot.has(tid) && !picked.includes(tid));
+        if (!candidates.length) {
+          roomWarnings.push('可用监考教师不足');
+          break;
+        }
+        candidates.sort((a, b) => {
+          let scoreA = -(dutyCount.get(a) || 0) * 50;
+          let scoreB = -(dutyCount.get(b) || 0) * 50;
+
+          const teachesClassA = room.classId ? scope.plans.some(p => p.classId === room.classId && p.teacherId === a) : false;
+          const teachesClassB = room.classId ? scope.plans.some(p => p.classId === room.classId && p.teacherId === b) : false;
+          if (rules.taughtClass === 'avoid') { scoreA += teachesClassA ? -100 : 20; scoreB += teachesClassB ? -100 : 20; }
+          else if (rules.taughtClass === 'prefer' && k === 0) { scoreA += teachesClassA ? 100 : 0; scoreB += teachesClassB ? 100 : 0; }
+
+          const teachesSubjA = slot.subjectId ? scope.plans.some(p => p.subjectId === slot.subjectId && p.teacherId === a) : false;
+          const teachesSubjB = slot.subjectId ? scope.plans.some(p => p.subjectId === slot.subjectId && p.teacherId === b) : false;
+          if (rules.taughtSubject === 'avoid') { scoreA += teachesSubjA ? -80 : 15; scoreB += teachesSubjB ? -80 : 15; }
+          else if (rules.taughtSubject === 'prefer' && k === 0) { scoreA += teachesSubjA ? 80 : 0; scoreB += teachesSubjB ? 80 : 0; }
+
+          return scoreB - scoreA;
+        });
+
+        const chosen = candidates[0];
+        picked.push(chosen);
+        busyInSlot.add(chosen);
+        dutyCount.set(chosen, (dutyCount.get(chosen) || 0) + 1);
+      }
+      if (roomWarnings.length) warnings.push({ slotId: slot.id, roomId: room.id, message: roomWarnings[0] });
+      assignments.push({ id: id('pro'), slotId: slot.id, roomId: room.id, teacherIds: picked, warnings: roomWarnings });
+    }
+  }
+  exam.assignments = assignments;
+  return { assignments, warnings, dutyCount: Object.fromEntries(dutyCount) };
+}
+
 module.exports = {
   id, now, defaultPeriods, emptyScope, ensureScope,
   checkPlacement, detectAllConflicts, autoSchedule,
   suggestAlternatives, suggestSubstitutes,
+  runSmartPlacement, autoAssignProctors,
 };

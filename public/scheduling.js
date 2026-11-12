@@ -16,6 +16,8 @@
     conflictModal: null,
     myData: null,
     myLoading: false,
+    examView: 'plan',
+    selectedExamId: '',
   };
 
   function getDayNames(days) {
@@ -73,7 +75,7 @@
     const bg = hasConflict ? '#fef2f2' : e.locked ? '#f8fafc' : '#fff';
     return '<div draggable="' + (!e.locked) + '" data-sched-entry="' + esc(e.id) + '" style="padding:7px 9px;border-radius:8px;border:' + border + ';background:' + bg + ';cursor:' + (e.locked ? 'default' : 'grab') + ';margin-bottom:4px">' +
       '<div class="row-between" style="gap:4px"><strong style="font-size:13px">' + esc(subj?.name || '课程') + '</strong>' +
-      '<span>' + (e.locked ? '🔒' : '') + (e.temporary ? '<span class="pill blue" style="font-size:10px;padding:1px 5px">临时</span>' : '') + (hasConflict ? '<span class="pill" style="background:#fee2e2;color:#b91c1c;font-size:10px;padding:1px 5px">冲突</span>' : '') + '</span></div>' +
+      '<span>' + (e.locked ? '🔒' : '') + (e.groupId ? '<span class="pill" style="background:#ede9fe;color:#5b21b6;font-size:10px;padding:1px 5px">合班</span>' : '') + (e.temporary ? '<span class="pill blue" style="font-size:10px;padding:1px 5px">临时</span>' : '') + (hasConflict ? '<span class="pill" style="background:#fee2e2;color:#b91c1c;font-size:10px;padding:1px 5px">冲突</span>' : '') + '</span></div>' +
       '<div class="tiny muted">' + esc(tch?.name || '') + (cls ? ' · ' + esc(cls.name) : '') + (rm ? ' · ' + esc(rm.name) : '') + '</div>' +
       '<div class="row" style="gap:6px;margin-top:4px">' +
       '<button type="button" class="btn-text" style="font-size:11px;padding:0" data-sched-action="toggle-lock" data-id="' + esc(e.id) + '">' + (e.locked ? '解锁' : '锁定') + '</button>' +
@@ -274,6 +276,141 @@
     return reqHtml + logsHtml;
   }
 
+
+  function dFallbackSubj(name) {
+    return (schedUI.data?.scope?.subjects || []).find(s => s.name === name);
+  }
+  function renderCombinedTab(d) {
+    const scope = d.scope;
+    const teachers = d.teachers || [];
+    const groupedIds = new Set((scope.combinedGroups || []).flatMap(g => g.planIds || []));
+    const availablePlans = (scope.plans || []).filter(pl => !groupedIds.has(pl.id));
+    const planCheckboxes = availablePlans.length
+      ? availablePlans.map(pl => {
+          const cls = scope.classes.find(c => c.id === pl.classId)?.name || '';
+          const sub = scope.subjects.find(s => s.id === pl.subjectId)?.name || '';
+          const tch = teachers.find(t => t.id === pl.teacherId)?.name || '';
+          return '<label style="display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;font-size:13px"><input type="checkbox" name="planIds" value="' + esc(pl.id) + '"><span><strong>' + esc(cls) + '</strong> · ' + esc(sub) + ' · ' + esc(tch) + ' (' + pl.weeklyHours + '节/周)</span></label>';
+        }).join('')
+      : '<p class="small muted">暂无可合并的独立授课计划（请先在“基础数据”添加同一老师、同一科目的多班计划）。</p>';
+
+    const formHtml = '<section class="panel panel-pad" style="margin-bottom:20px"><h3>合班设置（同师同科多班合并）</h3>' +
+      '<p class="small muted">勾选同一位教师、同一科目的多个班级计划，合并后自动排课与拖拽调课将跨班联动同步。</p>' +
+      '<form id="sched-combined-form"><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px;margin-bottom:12px">' + planCheckboxes + '</div>' +
+      '<div class="form-grid"><div class="field"><label>合班简称 (可选)</label><input name="shortName" placeholder="留空自动生成，如 高一1+2班 / 通用技术"></div>' +
+      '<div class="field"><label>指定合班教室 (如阶梯教室)</label><select name="roomId"><option value="">沿用原教室</option>' + scope.rooms.map(r => '<option value="' + esc(r.id) + '">' + esc(r.name) + ' (' + r.capacity + '座)</option>').join('') + '</select></div></div>' +
+      '<button type="submit" class="btn btn-primary btn-sm">合并为合班课</button></form></section>';
+
+    const listHtml = '<section class="panel panel-pad"><h3>已创建的合班课 (' + (scope.combinedGroups || []).length + ')</h3>' +
+      ((scope.combinedGroups || []).length ? scope.combinedGroups.map(g => {
+        const tch = teachers.find(t => t.id === g.teacherId)?.name || '';
+        const rm = scope.rooms.find(r => r.id === g.roomId)?.name || '';
+        return '<div class="student-detail-row"><span><strong>' + esc(g.shortName) + '</strong> · ' + esc(tch) + (rm ? ' · ' + esc(rm) : '') + ' · ' + g.weeklyHours + '节/周</span>' +
+          '<button type="button" class="btn btn-danger btn-sm" data-sched-action="del-combined" data-id="' + esc(g.id) + '">解除合班</button></div>';
+      }).join('') : '<p class="small muted">尚未设置合班课程。</p>') + '</section>';
+    return formHtml + listHtml;
+  }
+
+  function renderPlacementTab(d) {
+    const pl = d.scope.placement || { students: [], config: {}, result: null };
+    const cfg = pl.config || {};
+    const importHtml = '<section class="panel panel-pad" style="margin-bottom:16px"><div class="row-between wrap"><div><h3>1. 导入新生名单</h3>' +
+      '<p class="small muted">支持性别、总分/单科成绩、名次、特长标签，以及双胞胎绑定组与同名互斥组。当前已导入：<strong>' + (pl.students?.length || 0) + '</strong> 人</p></div>' +
+      '<a class="btn btn-light btn-sm" href="/api/admin/schedule/placement/template" download="student-placement-template.csv">⬇ 下载新生分班模板 (.csv)</a></div>' +
+      '<form id="sched-placement-import-form" style="margin-top:10px"><div class="row wrap"><input id="placement-csv-file" type="file" accept=".csv,text/csv" required><button type="submit" class="btn btn-soft btn-sm">导入新生名单</button></div></form></section>';
+
+    const configHtml = '<section class="panel panel-pad" style="margin-bottom:16px"><h3>2. 设置均衡分班规则</h3>' +
+      '<form id="sched-placement-preview-form"><div class="form-grid">' +
+      '<div class="field"><label>目标班级数量</label><input name="classCount" type="number" min="1" max="50" value="' + n(cfg.classCount || 2) + '" required></div>' +
+      '<div class="field"><label>班级名称前缀</label><input name="classPrefix" value="' + esc(cfg.classPrefix || '新生') + '" required></div>' +
+      '<div class="field"><label>成绩均衡模式</label><select name="mode"><option value="total"' + (cfg.mode==='total'?' selected':'') + '>总分均衡模式</option><option value="subjects"' + (cfg.mode==='subjects'?' selected':'') + '>多科均衡(语数英+总分)</option><option value="rankBand"' + (cfg.mode==='rankBand'?' selected':'') + '>名次分段均衡</option><option value="percentTier"' + (cfg.mode==='percentTier'?' selected':'') + '>百分比分层均衡</option></select></div>' +
+      '<div class="field"><label style="display:flex;align-items:center;gap:6px;margin-top:26px"><input type="checkbox" name="genderBalance" value="1"' + (cfg.genderBalance !== false ? ' checked' : '') + '> 启用男女生人数均衡</label></div></div>' +
+      '<button type="submit" class="btn btn-primary btn-sm">⚡ 生成分班预览</button></form></section>';
+
+    const res = pl.result;
+    const resHtml = res ? '<section class="panel panel-pad"><div class="row-between wrap" style="margin-bottom:12px"><div><h3>3. 分班均衡度预览 (' + res.length + ' 个班)</h3><p class="small muted">已自动执行双胞胎绑定、互斥拆分与特长分散均衡。</p></div>' +
+      '<div class="row wrap"><button type="button" class="btn btn-primary btn-sm" data-sched-action="commit-placement">✅ 确认生成正式行政班</button>' +
+      '<a class="btn btn-light btn-sm" href="/api/admin/schedule/placement/export" download="placement-roster.csv">⬇ 导出分班名册 (.csv)</a></div></div>' +
+      '<div class="table-wrap"><table class="data-table"><thead><tr><th>班级</th><th>总人数</th><th>男 / 女</th><th>总分均分</th><th>语 / 数 / 英均分</th><th>特长分布</th></tr></thead><tbody>' +
+      res.map(c => '<tr><td><strong>' + esc(c.name) + '</strong></td><td>' + c.count + '</td><td>' + c.male + ' / ' + c.female + '</td><td>' + c.avgTotal + '</td><td>' + c.avgChinese + ' / ' + c.avgMath + ' / ' + c.avgEnglish + '</td><td>' + esc(Object.entries(c.tagCounts || {}).map(([k, v]) => k + ':' + v).join(' ') || '—') + '</td></tr>').join('') +
+      '</tbody></table></div></section>' : '';
+
+    return importHtml + configHtml + resHtml;
+  }
+
+  function renderExamsTab(d) {
+    const scope = d.scope;
+    const teachers = d.teachers || [];
+    const exams = scope.exams || [];
+    const activeExam = exams.find(ex => ex.id === schedUI.selectedExamId) || exams[0] || null;
+
+    const createHtml = '<section class="panel panel-pad" style="margin-bottom:16px"><h3>新建考试与监考规则</h3>' +
+      '<form id="sched-exam-create-form"><div class="form-grid">' +
+      '<div class="field"><label>考试名称 *</label><input name="name" placeholder="如 2026秋期中考试" required></div>' +
+      '<div class="field"><label>每场每考场监考人数</label><select name="proctorsPerRoom"><option value="1">1人</option><option value="2">2人</option></select></div>' +
+      '<div class="field"><label>所教班级规则</label><select name="taughtClass"><option value="avoid">尽量避免监考自己任教班级</option><option value="any">无所谓</option><option value="prefer">优先安排一位任教教师</option></select></div>' +
+      '<div class="field"><label>所教课程规则</label><select name="taughtSubject"><option value="avoid">尽量避免监考自己所教科目</option><option value="any">无所谓</option><option value="prefer">优先安排一位任课教师</option></select></div></div>' +
+      '<div class="form-grid"><div class="field"><label>考试场次（每行一场：场次名,时间段,科目名称）</label><textarea name="slotsText" rows="2" placeholder="第一场 上午,08:30-10:30,数学&#10;第二场 下午,14:00-16:00,英语" required>第一场 上午,08:30-10:30,语文&#10;第二场 下午,14:00-16:00,数学</textarea></div>' +
+      '<div class="field"><label>考场列表（逗号分隔，可直接填班级或教室名）</label><textarea name="roomsText" rows="2" required>' + esc(scope.classes.length ? scope.classes.map(c => c.name).join(',') : '第1考场,第2考场') + '</textarea></div></div>' +
+      '<button type="submit" class="btn btn-primary btn-sm">+ 创建考试计划</button></form></section>';
+
+    let detailHtml = '';
+    if (activeExam) {
+      const viewPills = '<div class="filter-pills" style="margin:12px 0">' +
+        [['plan', '📅 按考试计划'], ['teacher', '👨‍🏫 按监考教师'], ['room', '🏫 按考场']]
+          .map(([k, label]) => '<button type="button" class="' + (schedUI.examView === k ? 'active' : '') + '" data-sched-action="exam-view" data-mode="' + k + '">' + label + '</button>').join('') +
+        '</div>';
+      const asgs = activeExam.assignments || [];
+      let matrixHtml = '';
+      if (!asgs.length) {
+        matrixHtml = '<p class="small muted">点击下方“自动排监考”即可按规则避开上课时间冲突并均衡分配监考老师。</p>';
+      } else if (schedUI.examView === 'plan') {
+        matrixHtml = '<div class="table-wrap"><table class="data-table"><thead><tr><th>场次 / 科目</th>' + activeExam.rooms.map(r => '<th>' + esc(r.name) + '</th>').join('') + '</tr></thead><tbody>' +
+          activeExam.slots.map(sl => '<tr><td><strong>' + esc(sl.dateLabel) + '</strong><br><span class="tiny muted">' + esc(sl.startTime + '-' + sl.endTime + ' · ' + sl.subjectName) + '</span></td>' +
+            activeExam.rooms.map(rm => {
+              const a = asgs.find(x => x.slotId === sl.id && x.roomId === rm.id);
+              const names = (a?.teacherIds || []).map(tid => teachers.find(t => t.id === tid)?.name || tid).join('、') || '未分配';
+              return '<td><strong>' + esc(names) + '</strong>' + (a?.warnings?.length ? '<div class="tiny" style="color:#b91c1c">' + esc(a.warnings[0]) + '</div>' : '') + '</td>';
+            }).join('') + '</tr>').join('') +
+          '</tbody></table></div>';
+      } else if (schedUI.examView === 'teacher') {
+        const byTeacher = new Map();
+        for (const a of asgs) {
+          const sl = activeExam.slots.find(s => s.id === a.slotId);
+          const rm = activeExam.rooms.find(r => r.id === a.roomId);
+          for (const tid of (a.teacherIds || [])) {
+            if (!byTeacher.has(tid)) byTeacher.set(tid, []);
+            byTeacher.get(tid).push(`${sl?.dateLabel || ''} (${sl?.subjectName || ''}) → ${rm?.name || ''}`);
+          }
+        }
+        matrixHtml = [...byTeacher.entries()].map(([tid, list]) => {
+          const tName = teachers.find(t => t.id === tid)?.name || tid;
+          return '<div class="student-detail-row"><span><strong>' + esc(tName) + '</strong> (共 ' + list.length + ' 场)</span><span class="small muted">' + esc(list.join(' | ')) + '</span></div>';
+        }).join('');
+      } else {
+        matrixHtml = activeExam.rooms.map(rm => {
+          const list = asgs.filter(a => a.roomId === rm.id).map(a => {
+            const sl = activeExam.slots.find(s => s.id === a.slotId);
+            const names = (a.teacherIds || []).map(tid => teachers.find(t => t.id === tid)?.name || tid).join('、');
+            return `${sl?.dateLabel || ''} ${sl?.subjectName || ''}: ${names}`;
+          });
+          return '<div class="student-detail-row"><span><strong>' + esc(rm.name) + '</strong></span><span class="small muted">' + esc(list.join(' | ')) + '</span></div>';
+        }).join('');
+      }
+
+      detailHtml = '<section class="panel panel-pad"><div class="row-between wrap"><div><h3>' + esc(activeExam.name) + '</h3>' +
+        '<p class="small muted">规则：所教班级(' + esc(activeExam.rules?.taughtClass) + ') · 所教课程(' + esc(activeExam.rules?.taughtSubject) + ')</p></div>' +
+        '<div class="row wrap">' +
+        (exams.length > 1 ? '<select data-sched-select="exam">' + exams.map(ex => '<option value="' + esc(ex.id) + '"' + (ex.id === activeExam.id ? ' selected' : '') + '>' + esc(ex.name) + '</option>').join('') + '</select>' : '') +
+        '<button type="button" class="btn btn-primary btn-sm" data-sched-action="auto-proctor" data-id="' + esc(activeExam.id) + '">⚡ 自动排监考</button>' +
+        '<a class="btn btn-light btn-sm" href="/api/admin/schedule/exams/' + encodeURIComponent(activeExam.id) + '/export" download="exam-proctoring.csv">⬇ 导出监考表 (.csv)</a>' +
+        '<button type="button" class="btn btn-light btn-sm" onclick="window.print()">🖨 打印</button>' +
+        '<button type="button" class="btn btn-danger btn-sm" data-sched-action="del-exam" data-id="' + esc(activeExam.id) + '">删除</button>' +
+        '</div></div>' + viewPills + matrixHtml + '</section>';
+    }
+    return createHtml + detailHtml;
+  }
+
   function renderAdminScheduleWorkspace() {
     if (!schedUI.data && !schedUI.error) {
       loadAdminSchedule();
@@ -287,9 +424,12 @@
     const subNav = '<div class="tabs" style="margin-bottom:16px">' +
       '<button type="button" class="tab ' + (schedUI.subTab === 'timetable' ? 'active' : '') + '" data-sched-action="subtab" data-tab="timetable">📅 智能排课与课表视图</button>' +
       '<button type="button" class="tab ' + (schedUI.subTab === 'basedata' ? 'active' : '') + '" data-sched-action="subtab" data-tab="basedata">⚙ 基础数据与约束设置</button>' +
+      '<button type="button" class="tab ' + (schedUI.subTab === 'combined' ? 'active' : '') + '" data-sched-action="subtab" data-tab="combined">🔗 合班设置</button>' +
+      '<button type="button" class="tab ' + (schedUI.subTab === 'placement' ? 'active' : '') + '" data-sched-action="subtab" data-tab="placement">🎓 智能分班</button>' +
+      '<button type="button" class="tab ' + (schedUI.subTab === 'exams' ? 'active' : '') + '" data-sched-action="subtab" data-tab="exams">📝 监考安排</button>' +
       '<button type="button" class="tab ' + (schedUI.subTab === 'approvals' ? 'active' : '') + '" data-sched-action="subtab" data-tab="approvals">📝 调课审批与日志' + (pendingCount ? ' (' + pendingCount + ')' : '') + '</button>' +
       '</div>';
-    const content = schedUI.subTab === 'timetable' ? renderTimetableTab(d) : schedUI.subTab === 'basedata' ? renderBaseDataTab(d) : renderApprovalsTab(d);
+    const content = schedUI.subTab === 'timetable' ? renderTimetableTab(d) : schedUI.subTab === 'basedata' ? renderBaseDataTab(d) : schedUI.subTab === 'combined' ? renderCombinedTab(d) : schedUI.subTab === 'placement' ? renderPlacementTab(d) : schedUI.subTab === 'exams' ? renderExamsTab(d) : renderApprovalsTab(d);
     return subNav + content + renderAddSlotModal(d) + renderConflictModal();
   }
 
@@ -419,6 +559,23 @@
       run(async () => { await api('/api/admin/schedule/' + map[act] + '/' + encodeURIComponent(btn.dataset.id), { method: 'DELETE' }); await refreshAdminSchedule(); }, '删除失败: ');
       return;
     }
+    if (act === 'exam-view') { schedUI.examView = btn.dataset.mode; render(); return; }
+    if (act === 'del-combined') {
+      run(async () => { await api('/api/admin/schedule/combined/' + encodeURIComponent(btn.dataset.id), { method: 'DELETE' }); await refreshAdminSchedule(); showToast('已解除合班'); }, '操作失败: ');
+      return;
+    }
+    if (act === 'commit-placement') {
+      run(async () => { const res = await api('/api/admin/schedule/placement/commit', { method: 'POST', body: JSON.stringify({}) }); await refreshAdminSchedule(); showToast('已正式生成 ' + res.classes.length + ' 个行政班'); }, '生成失败: ');
+      return;
+    }
+    if (act === 'auto-proctor') {
+      run(async () => { await api('/api/admin/schedule/exams/' + encodeURIComponent(btn.dataset.id) + '/auto', { method: 'POST', body: JSON.stringify({}) }); await refreshAdminSchedule(); showToast('已完成自动排监考'); }, '排监考失败: ');
+      return;
+    }
+    if (act === 'del-exam') {
+      run(async () => { await api('/api/admin/schedule/exams/' + encodeURIComponent(btn.dataset.id), { method: 'DELETE' }); schedUI.selectedExamId = ''; await refreshAdminSchedule(); showToast('已删除考试计划'); }, '删除失败: ');
+      return;
+    }
     if (act === 'approve-swap' || act === 'reject-swap') {
       const decision = act === 'approve-swap' ? 'approve' : 'reject';
       run(async () => { await api('/api/admin/schedule/requests/' + encodeURIComponent(btn.dataset.id) + '/review', { method: 'POST', body: JSON.stringify({ decision }) }); await refreshAdminSchedule(); showToast(decision === 'approve' ? '已同意并自动更新课表' : '已驳回'); }, '审批失败: ');
@@ -432,6 +589,7 @@
     else if (sel === 'teacher') schedUI.selectedTeacherId = event.target.value;
     else if (sel === 'room') schedUI.selectedRoomId = event.target.value;
     else if (sel === 'rule-teacher') schedUI.selectedRuleTeacherId = event.target.value;
+    else if (sel === 'exam') schedUI.selectedExamId = event.target.value;
     render();
   });
 
@@ -460,7 +618,7 @@
 
   document.addEventListener('submit', event => {
     const form = event.target;
-    const ids = ['sched-settings-form', 'sched-grade-form', 'sched-class-form', 'sched-subject-form', 'sched-room-form', 'sched-plan-form', 'sched-teacher-rule-form', 'sched-manual-entry-form', 'sched-force-form', 'teacher-swap-req-form'];
+    const ids = ['sched-settings-form', 'sched-grade-form', 'sched-class-form', 'sched-subject-form', 'sched-room-form', 'sched-plan-form', 'sched-teacher-rule-form', 'sched-manual-entry-form', 'sched-force-form', 'teacher-swap-req-form', 'sched-combined-form', 'sched-placement-import-form', 'sched-placement-preview-form', 'sched-exam-create-form'];
     if (!ids.includes(form.id)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
@@ -495,6 +653,33 @@
         await api('/api/admin/schedule/entries', { method: 'POST', body: JSON.stringify(candidate) });
         schedUI.conflictModal = null; schedUI.addSlot = null; await refreshAdminSchedule(); showToast('已强制放行并记录日志');
       }, '操作失败: ');
+    } else if (form.id === 'sched-combined-form') {
+      const planIds = [...form.querySelectorAll('input[name="planIds"]:checked')].map(x => x.value);
+      run(async () => { await api('/api/admin/schedule/combined', { method: 'POST', body: JSON.stringify({ ...values, planIds }) }); await refreshAdminSchedule(); showToast('合班创建成功'); }, '合班失败: ');
+    } else if (form.id === 'sched-placement-import-form') {
+      const file = form.querySelector('input[type="file"]')?.files?.[0];
+      if (!file) return;
+      run(async () => { const csv = await file.text(); const res = await api('/api/admin/schedule/placement/import', { method: 'POST', body: JSON.stringify({ csv }) }); await refreshAdminSchedule(); showToast('已导入 ' + res.count + ' 名新生'); }, '导入失败: ');
+    } else if (form.id === 'sched-placement-preview-form') {
+      const genderBalance = Boolean(form.querySelector('input[name="genderBalance"]')?.checked);
+      run(async () => { await api('/api/admin/schedule/placement/preview', { method: 'POST', body: JSON.stringify({ ...values, genderBalance }) }); await refreshAdminSchedule(); showToast('分班预览已生成'); }, '分班失败: ');
+    } else if (form.id === 'sched-exam-create-form') {
+      const slots = String(values.slotsText || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean).map(line => {
+        const [dateLabel, timeRange, subjectName] = line.split(',').map(x => x.trim());
+        const [startTime, endTime] = (timeRange || '08:30-10:30').split('-');
+        const subj = dFallbackSubj(subjectName);
+        return { dateLabel: dateLabel || '第一场', startTime: startTime || '08:30', endTime: endTime || '10:30', subjectName: subjectName || '', subjectId: subj?.id || '' };
+      });
+      const rooms = String(values.roomsText || '').split(/[,，\n]/).map(x => x.trim()).filter(Boolean).map(name => {
+        const cls = (schedUI.data?.scope?.classes || []).find(c => c.name === name);
+        return { name, classId: cls?.id || '' };
+      });
+      run(async () => {
+        const res = await api('/api/admin/schedule/exams', { method: 'POST', body: JSON.stringify({ name: values.name, slots, rooms, rules: { taughtClass: values.taughtClass, taughtSubject: values.taughtSubject, proctorsPerRoom: Number(values.proctorsPerRoom || 1) } }) });
+        schedUI.selectedExamId = res.exam.id;
+        await refreshAdminSchedule();
+        showToast('考试计划已创建');
+      }, '创建失败: ');
     } else if (form.id === 'teacher-swap-req-form') {
       run(async () => {
         await api('/api/teacher/schedule/requests', { method: 'POST', body: JSON.stringify(values) });

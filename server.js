@@ -1291,19 +1291,24 @@ async function api(req, res, url) {
     if (!a || !b) fail(404, '未找到要互换的课程');
     if (a.locked || b.locked) fail(400, '已锁定的固定课程不可拖拽互换');
     const ignore = new Set([a.id, b.id]);
-    const nextA = { ...a, day: b.day, periodId: b.periodId, temporary: true, updatedAt: sched.now() };
-    const nextB = { ...b, day: a.day, periodId: a.periodId, temporary: true, updatedAt: sched.now() };
-    const chkA = sched.checkPlacement(scope, nextA, ignore);
-    const chkB = sched.checkPlacement(scope, nextB, ignore);
-    if ((!chkA.valid || !chkB.valid) && !body.forceOverride) {
-      return json(res, 409, {
-        error: [...chkA.hard, ...chkB.hard][0]?.message || '互换后存在冲突',
-        hard: [...chkA.hard, ...chkB.hard],
-        warnings: [...chkA.warnings, ...chkB.warnings],
-      });
+    const groupA = a.groupId ? scope.entries.filter(e => e.groupId === a.groupId && e.day === a.day && e.periodId === a.periodId) : [a];
+    const groupB = b.groupId ? scope.entries.filter(e => e.groupId === b.groupId && e.day === b.day && e.periodId === b.periodId) : [b];
+    const fullIgnore = new Set([...groupA.map(x => x.id), ...groupB.map(x => x.id)]);
+    const hardAll = [], warnAll = [];
+    for (const item of groupA) {
+      const chk = sched.checkPlacement(scope, { ...item, day: b.day, periodId: b.periodId }, fullIgnore);
+      hardAll.push(...chk.hard); warnAll.push(...chk.warnings);
     }
-    Object.assign(a, nextA);
-    Object.assign(b, nextB);
+    for (const item of groupB) {
+      const chk = sched.checkPlacement(scope, { ...item, day: a.day, periodId: a.periodId }, fullIgnore);
+      hardAll.push(...chk.hard); warnAll.push(...chk.warnings);
+    }
+    if (hardAll.length && !body.forceOverride) {
+      return json(res, 409, { error: hardAll[0].message, hard: hardAll, warnings: warnAll });
+    }
+    const dayA = a.day, perA = a.periodId, dayB = b.day, perB = b.periodId;
+    for (const item of groupA) { item.day = dayB; item.periodId = perB; item.temporary = true; item.updatedAt = sched.now(); }
+    for (const item of groupB) { item.day = dayA; item.periodId = perA; item.temporary = true; item.updatedAt = sched.now(); }
     addAuditLog(scope, user, '拖拽互换调课', `周${b.day}${b.periodId} ↔ 周${a.day}${a.periodId}`, body.overrideReason || '');
     save();
     return json(res, 200, { ok: true, entries: scope.entries, conflicts: sched.detectAllConflicts(scope) });
@@ -1322,7 +1327,12 @@ async function api(req, res, url) {
   if (sMatch && method === 'DELETE') {
     requireAdmin(user);
     const scope = sched.ensureScope(db, schedScopeKey(user));
-    scope.entries = scope.entries.filter(e => e.id !== sMatch[1]);
+    const targetEntry = scope.entries.find(e => e.id === sMatch[1]);
+    if (targetEntry?.groupId) {
+      scope.entries = scope.entries.filter(e => !(e.groupId === targetEntry.groupId && e.day === targetEntry.day && e.periodId === targetEntry.periodId));
+    } else {
+      scope.entries = scope.entries.filter(e => e.id !== sMatch[1]);
+    }
     addAuditLog(scope, user, '删除排课记录', sMatch[1]);
     save();
     return json(res, 200, { ok: true });
@@ -1393,6 +1403,267 @@ async function api(req, res, url) {
       rows.push([daysMap[e.day] || e.day, p?.name || e.periodId, p ? `${p.startTime}-${p.endTime}` : '', cls, sub, tch, rm, st].map(v => `"${String(v).replace(/"/g, '""')}"`).join(','));
     }
     res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="zhixing-timetable.csv"', 'Cache-Control': 'no-store' });
+    res.end(rows.join('\r\n'));
+    return;
+  }
+  // --- Combined Classes (合班排课) ---
+  if (pathname === '/api/admin/schedule/combined' && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const planIds = Array.isArray(body.planIds) ? [...new Set(body.planIds.map(String))] : [];
+    if (planIds.length < 2) fail(400, '请至少勾选 2 条同师同科的教学计划进行合班');
+    const plans = planIds.map(pid => scope.plans.find(pl => pl.id === pid)).filter(Boolean);
+    if (plans.length !== planIds.length) fail(404, '部分教学计划不存在');
+    const teacherId = plans[0].teacherId;
+    const subjectId = plans[0].subjectId;
+    if (plans.some(pl => pl.teacherId !== teacherId || pl.subjectId !== subjectId)) {
+      fail(400, '仅允许同一教师且同一科目的教学计划合并');
+    }
+    const classIds = [...new Set(plans.map(pl => pl.classId))];
+    if (classIds.length < 2) fail(400, '合班需要选择不同的班级');
+    const classNames = classIds.map(cid => scope.classes.find(c => c.id === cid)?.name || cid).join('+');
+    const subjName = scope.subjects.find(s => s.id === subjectId)?.name || '';
+    const grp = {
+      id: sched.id('grp'),
+      shortName: safeText(body.shortName || `${classNames} / ${subjName}`, 'Combined name', 80),
+      teacherId, subjectId, classIds, planIds,
+      roomId: String(body.roomId || plans[0].roomId || ''),
+      weeklyHours: Number(body.weeklyHours || plans[0].weeklyHours || 2),
+      createdAt: sched.now(),
+    };
+    scope.combinedGroups.push(grp);
+    addAuditLog(scope, user, '创建合班课', grp.shortName);
+    save();
+    return json(res, 201, { group: grp });
+  }
+  sMatch = pathname.match(/^\/api\/admin\/schedule\/combined\/([^/]+)$/);
+  if (sMatch && method === 'DELETE') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    scope.combinedGroups = scope.combinedGroups.filter(g => g.id !== sMatch[1]);
+    for (const e of scope.entries) if (e.groupId === sMatch[1]) delete e.groupId;
+    addAuditLog(scope, user, '解除合班', sMatch[1]);
+    save();
+    return json(res, 200, { ok: true });
+  }
+
+  // --- Smart Student Placement (智能新生分班) ---
+  if (pathname === '/api/admin/schedule/placement/template' && method === 'GET') {
+    requireAdmin(user);
+    const csv = '\uFEFF姓名,性别,学号,总分,语文,数学,英语,名次,特长标签,绑定组,互斥组,备注\r\n' +
+      '张一,男,20260001,620,120,135,125,12,信息,twin1,,双胞胎\r\n' +
+      '张二,女,20260002,615,118,130,128,15,,twin1,,双胞胎\r\n' +
+      '李明,男,20260003,590,115,120,118,45,体育,,name_lm,\r\n' +
+      '李明(重名),男,20260004,585,112,118,120,52,美术,,name_lm,\r\n';
+    res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="student-placement-template.csv"', 'Cache-Control': 'no-store' });
+    res.end(csv);
+    return;
+  }
+  if (pathname === '/api/admin/schedule/placement/import' && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    let imported = [];
+    if (Array.isArray(body.students)) {
+      imported = body.students.map((s, idx) => ({
+        id: sched.id('pstu'),
+        name: safeText(s.name, 'Student name', 60),
+        gender: safeText(s.gender ?? '', 'Gender', 20, false),
+        studentId: safeText(s.studentId ?? '', 'Student ID', 32, false),
+        scores: { total: Number(s.scores?.total ?? s.total ?? 0), chinese: Number(s.scores?.chinese ?? s.chinese ?? 0), math: Number(s.scores?.math ?? s.math ?? 0), english: Number(s.scores?.english ?? s.english ?? 0) },
+        rank: Number(s.rank || idx + 1),
+        tags: { specialty: safeText(s.tags?.specialty ?? s.specialty ?? '', 'Specialty', 40, false) },
+        bindGroup: safeText(s.bindGroup ?? '', 'Bind group', 40, false),
+        mutexGroup: safeText(s.mutexGroup ?? '', 'Mutex group', 40, false),
+        note: safeText(s.note ?? '', 'Note', 100, false),
+      }));
+    } else if (typeof body.csv === 'string') {
+      const rows = parseCsvRows(body.csv);
+      if (rows.length < 2) fail(400, 'CSV 至少需要表头和一行新生数据');
+      const hdr = rows[0];
+      const idxOf = (...names) => hdr.findIndex(h => names.includes(h.trim()));
+      const iName = idxOf('姓名', '名字', 'name');
+      if (iName < 0) fail(400, '缺少“姓名”列');
+      const iGender = idxOf('性别', 'gender');
+      const iStuId = idxOf('学号', 'studentId');
+      const iTotal = idxOf('总分', 'total');
+      const iChi = idxOf('语文', 'chinese');
+      const iMath = idxOf('数学', 'math');
+      const iEng = idxOf('英语', 'english');
+      const iRank = idxOf('名次', 'rank');
+      const iTag = idxOf('特长标签', '特长', 'specialty');
+      const iBind = idxOf('绑定组', 'bindGroup');
+      const iMutex = idxOf('互斥组', 'mutexGroup');
+      const iNote = idxOf('备注', 'note');
+      for (let r = 1; r < rows.length; r++) {
+        const row = rows[r];
+        if (!row[iName]) continue;
+        imported.push({
+          id: sched.id('pstu'),
+          name: safeText(row[iName], 'Name', 60),
+          gender: iGender >= 0 ? (row[iGender] || '') : '',
+          studentId: iStuId >= 0 ? (row[iStuId] || '') : '',
+          scores: { total: Number(row[iTotal] || 0), chinese: Number(row[iChi] || 0), math: Number(row[iMath] || 0), english: Number(row[iEng] || 0) },
+          rank: Number(row[iRank] || r),
+          tags: { specialty: iTag >= 0 ? (row[iTag] || '') : '' },
+          bindGroup: iBind >= 0 ? (row[iBind] || '') : '',
+          mutexGroup: iMutex >= 0 ? (row[iMutex] || '') : '',
+          note: iNote >= 0 ? (row[iNote] || '') : '',
+        });
+      }
+    } else fail(400, '请提供 CSV 或学生列表');
+    scope.placement.students = imported;
+    scope.placement.result = null;
+    save();
+    return json(res, 200, { count: imported.length, students: imported });
+  }
+  if (pathname === '/api/admin/schedule/placement/preview' && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    if (!scope.placement.students.length) fail(400, '请先导入新生名单');
+    const cfg = {
+      classCount: Math.max(1, Math.min(50, Number(body.classCount || scope.placement.config?.classCount || 2))),
+      classPrefix: safeText(body.classPrefix || scope.placement.config?.classPrefix || '新生', 'Class prefix', 30),
+      mode: ['total', 'subjects', 'rankBand', 'percentTier'].includes(body.mode) ? body.mode : 'total',
+      genderBalance: body.genderBalance !== false,
+      gradeId: String(body.gradeId || ''),
+    };
+    scope.placement.config = cfg;
+    scope.placement.result = sched.runSmartPlacement(scope.placement.students, cfg);
+    save();
+    return json(res, 200, { result: scope.placement.result });
+  }
+  if (pathname === '/api/admin/schedule/placement/commit' && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    if (!Array.isArray(scope.placement.result) || !scope.placement.result.length) fail(400, '请先执行分班预览');
+    const createdClasses = [];
+    for (const clsRes of scope.placement.result) {
+      const matchedUserIds = clsRes.students.map(ps => db.users.find(u => u.role === 'student' && (u.studentId === ps.studentId || u.name === ps.name) && canAdminManage(user, u))?.id).filter(Boolean);
+      const cls = {
+        id: sched.id('cls'),
+        name: clsRes.name,
+        code: '',
+        gradeId: scope.placement.config?.gradeId || '',
+        type: 'admin',
+        headTeacherId: '',
+        studentCount: clsRes.count,
+        blockedSlots: [],
+        studentIds: matchedUserIds,
+      };
+      scope.classes.push(cls);
+      createdClasses.push(cls);
+    }
+    addAuditLog(scope, user, '正式生成分班班级', `生成 ${createdClasses.length} 个行政班`);
+    save();
+    return json(res, 201, { classes: createdClasses });
+  }
+  if (pathname === '/api/admin/schedule/placement/export' && method === 'GET') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const rows = ['\uFEFF新班级,姓名,性别,学号,总分,原名次,特长标签,备注'];
+    for (const cls of (scope.placement.result || [])) {
+      for (const s of (cls.students || [])) {
+        rows.push([cls.name, s.name, s.gender, s.studentId || '', s.total, s.rank, s.specialty || '', s.note || ''].map(v => `"${String(v).replace(/"/g, '""')}"`).join(','));
+      }
+    }
+    res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="placement-roster.csv"', 'Cache-Control': 'no-store' });
+    res.end(rows.join('\r\n'));
+    return;
+  }
+
+  // --- Exam Proctoring (监考安排) ---
+  if (pathname === '/api/admin/schedule/exams' && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const exam = {
+      id: sched.id('exm'),
+      name: safeText(body.name, 'Exam name', 80),
+      startDate: safeText(body.startDate ?? '', 'Start date', 20, false),
+      endDate: safeText(body.endDate ?? '', 'End date', 20, false),
+      slots: Array.isArray(body.slots) ? body.slots.map((sl, idx) => ({
+        id: sl.id || sched.id('esl'),
+        dateLabel: safeText(sl.dateLabel || `第${idx + 1}场`, 'Date label', 40),
+        periodName: safeText(sl.periodName || '上午', 'Period name', 30),
+        startTime: safeText(sl.startTime || '08:30', 'Start', 10),
+        endTime: safeText(sl.endTime || '10:30', 'End', 10),
+        dayOfWeek: sl.dayOfWeek ? Number(sl.dayOfWeek) : null,
+        periodId: sl.periodId ? String(sl.periodId) : '',
+        subjectId: sl.subjectId ? String(sl.subjectId) : '',
+        subjectName: safeText(sl.subjectName ?? '', 'Subject', 40, false),
+      })) : [],
+      rooms: Array.isArray(body.rooms) ? body.rooms.map(r => ({
+        id: r.id || sched.id('erm'),
+        name: safeText(r.name, 'Exam room', 50),
+        classId: r.classId ? String(r.classId) : '',
+        capacity: Number(r.capacity || 40),
+      })) : [],
+      teacherIds: Array.isArray(body.teacherIds) ? body.teacherIds.map(String) : [],
+      rules: {
+        taughtClass: ['any', 'avoid', 'prefer'].includes(body.rules?.taughtClass) ? body.rules.taughtClass : 'avoid',
+        taughtSubject: ['any', 'avoid', 'prefer'].includes(body.rules?.taughtSubject) ? body.rules.taughtSubject : 'avoid',
+        proctorsPerRoom: Math.max(1, Math.min(3, Number(body.rules?.proctorsPerRoom || 1))),
+      },
+      assignments: [],
+      createdAt: sched.now(),
+    };
+    scope.exams.unshift(exam);
+    save();
+    return json(res, 201, { exam });
+  }
+  sMatch = pathname.match(/^\/api\/admin\/schedule\/exams\/([^/]+)$/);
+  if (sMatch && method === 'DELETE') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    scope.exams = scope.exams.filter(ex => ex.id !== sMatch[1]); save();
+    return json(res, 200, { ok: true });
+  }
+  sMatch = pathname.match(/^\/api\/admin\/schedule\/exams\/([^/]+)\/auto$/);
+  if (sMatch && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const exam = scope.exams.find(ex => ex.id === sMatch[1]);
+    if (!exam) fail(404, 'Exam not found');
+    const teachers = db.users.filter(u => u.role === 'teacher' && canAdminManage(user, u));
+    const resObj = sched.autoAssignProctors(scope, exam, teachers);
+    addAuditLog(scope, user, '自动排监考', `${exam.name}：生成 ${resObj.assignments.length} 条监考安排`);
+    save();
+    return json(res, 200, { exam, ...resObj });
+  }
+  sMatch = pathname.match(/^\/api\/admin\/schedule\/exams\/([^/]+)\/reassign$/);
+  if (sMatch && method === 'POST') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const exam = scope.exams.find(ex => ex.id === sMatch[1]);
+    if (!exam) fail(404, 'Exam not found');
+    const asg = exam.assignments.find(a => a.id === body.assignmentId);
+    if (!asg) fail(404, 'Assignment not found');
+    const newIds = Array.isArray(body.teacherIds) ? [...new Set(body.teacherIds.map(String).filter(Boolean))] : [];
+    const slot = exam.slots.find(s => s.id === asg.slotId);
+    for (const tid of newIds) {
+      const clash = exam.assignments.some(a => a.id !== asg.id && a.slotId === asg.slotId && a.teacherIds.includes(tid));
+      if (clash) fail(409, '该教师在同一考试时段已安排其他考场监考');
+      if (slot?.dayOfWeek && slot?.periodId && scope.entries.some(e => Number(e.day) === Number(slot.dayOfWeek) && e.periodId === slot.periodId && e.teacherId === tid)) {
+        fail(409, '该教师在该时段有正常上课安排，不可兼任监考');
+      }
+    }
+    asg.teacherIds = newIds;
+    save();
+    return json(res, 200, { assignment: asg });
+  }
+  sMatch = pathname.match(/^\/api\/admin\/schedule\/exams\/([^/]+)\/export$/);
+  if (sMatch && method === 'GET') {
+    requireAdmin(user);
+    const scope = sched.ensureScope(db, schedScopeKey(user));
+    const exam = scope.exams.find(ex => ex.id === sMatch[1]);
+    if (!exam) fail(404, 'Exam not found');
+    const rows = ['\uFEFF考试名称,场次日期,时间,科目,考场,监考教师'];
+    for (const a of (exam.assignments || [])) {
+      const sl = exam.slots.find(s => s.id === a.slotId);
+      const rm = exam.rooms.find(r => r.id === a.roomId);
+      const names = (a.teacherIds || []).map(tid => db.users.find(u => u.id === tid)?.name || tid).join('、');
+      rows.push([exam.name, sl?.dateLabel || '', sl ? `${sl.startTime}-${sl.endTime}` : '', sl?.subjectName || '', rm?.name || '', names].map(v => `"${String(v).replace(/"/g, '""')}"`).join(','));
+    }
+    res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="exam-proctoring.csv"', 'Cache-Control': 'no-store' });
     res.end(rows.join('\r\n'));
     return;
   }
