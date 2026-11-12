@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { streamZip } = require('./zip-stream');
+const storage = require('./storage');
 const resetMail = require('./email-smtp');
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -128,12 +129,66 @@ if (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD && !db.users.some(u =>
   db.users.push({ id: id('user'), role: 'admin', adminScope: 'global', name: process.env.ADMIN_NAME?.trim().slice(0, 60) || 'Site Administrator', email, studentId: null, passwordHash: hashPassword(password), active: true, createdAt: now() });
   migrated = true;
 }
-function save() {
+function migrateDb(target) {
+  let changed = false;
+  if (!Array.isArray(target.schools)) { target.schools = []; changed = true; }
+  for (const key of ['assignments', 'submissions', 'grades', 'departments', 'announcements']) {
+    if (!Array.isArray(target[key])) { target[key] = []; changed = true; }
+  }
+  for (const user of (target.users || [])) {
+    if (typeof user.gender !== 'string') { user.gender = ''; changed = true; }
+    if (typeof user.grade !== 'string') { user.grade = ''; changed = true; }
+    if (typeof user.department !== 'string') { user.department = ''; changed = true; }
+    if (typeof user.major !== 'string') { user.major = ''; changed = true; }
+    if (!user.accountId && user.studentId) { user.accountId = user.studentId; changed = true; }
+    if (user.role === 'admin' && !user.schoolId && !user.adminScope) { user.adminScope = 'global'; changed = true; }
+  }
+  for (const course of (target.courses || [])) {
+    if (!course.enrollmentCode) { course.enrollmentCode = newEnrollmentCode(target.courses); changed = true; }
+    if (!course.gradeWeights) { course.gradeWeights = { ...DEFAULT_WEIGHTS }; changed = true; }
+    if (!Array.isArray(course.announcements)) { course.announcements = []; changed = true; }
+  }
+  return changed;
+}
+let remoteSaveChain = Promise.resolve();
+function queueRemoteDbSave() {
+  const cfg = storage.getConfig();
+  if (!cfg.enabled) return;
+  const snapshot = JSON.stringify(db, null, 2);
+  remoteSaveChain = remoteSaveChain
+    .then(() => storage.putObject(cfg.dbKey, snapshot, 'application/json'))
+    .catch(err => console.error('Remote DB sync error:', err.message));
+}
+function saveLocal() {
+  fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
   const tmp = `${DATA_FILE}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(db, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, DATA_FILE);
 }
-if (migrated) save();
+function save() {
+  saveLocal();
+  queueRemoteDbSave();
+}
+if (migrated) saveLocal();
+const readyPromise = (async () => {
+  const cfg = storage.getConfig();
+  if (!cfg.enabled) return;
+  try {
+    const raw = await storage.getObject(cfg.dbKey);
+    if (raw) {
+      const parsed = JSON.parse(raw.toString('utf8'));
+      if (parsed && typeof parsed === 'object' && Array.isArray(parsed.users)) {
+        db = parsed;
+        migrateDb(db);
+        saveLocal();
+      }
+    } else if (db.users.length || db.schools.length || db.courses.length) {
+      await storage.putObject(cfg.dbKey, JSON.stringify(db, null, 2), 'application/json');
+    }
+  } catch (err) {
+    console.error('Remote DB bootstrap error:', err.message);
+  }
+})();
 
 class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 function fail(status, message) { throw new HttpError(status, message); }
@@ -303,20 +358,38 @@ function cleanFileName(req) {
   try { decoded = decodeURIComponent(decoded); } catch {}
   return String(decoded).replace(/[\/\\\r\n\x00-\x1f]/g, '_').slice(0, 150) || 'File';
 }
-function saveUpload(buffer, req, extension) {
+async function saveUpload(buffer, req, extension) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true, mode: 0o700 });
   const storedName = crypto.randomUUID() + extension;
+  const mimeType = req.headers['content-type'].split(';')[0].trim().toLowerCase();
   fs.writeFileSync(path.join(UPLOAD_DIR, storedName), buffer, { flag: 'wx', mode: 0o600 });
-  return { storedName, name: cleanFileName(req), mimeType: req.headers['content-type'].split(';')[0].trim().toLowerCase(), size: buffer.length };
+  if (storage.getConfig().enabled) {
+    await storage.putObject(`uploads/${storedName}`, buffer, mimeType);
+  }
+  return { storedName, name: cleanFileName(req), mimeType, size: buffer.length };
 }
 function removeUpload(meta) {
   if (meta?.storedName && /^[0-9a-f-]{36}\.[a-z0-9]+$/.test(meta.storedName)) {
     try { fs.unlinkSync(path.join(UPLOAD_DIR, meta.storedName)); } catch {}
+    if (storage.getConfig().enabled) {
+      storage.deleteObject(`uploads/${meta.storedName}`).catch(() => {});
+    }
   }
 }
-function streamUpload(req, res, meta, video = false) {
+async function ensureLocalFile(storedName) {
+  if (!storedName || !/^[0-9a-f-]{36}\.[a-z0-9]+$/.test(storedName)) return null;
+  const file = path.join(UPLOAD_DIR, storedName);
+  if (fs.existsSync(file)) return file;
+  if (!storage.getConfig().enabled) return file;
+  const buf = await storage.getObject(`uploads/${storedName}`);
+  if (!buf) return file;
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, buf, { mode: 0o600 });
+  return file;
+}
+async function streamUpload(req, res, meta, video = false) {
   if (!meta?.storedName || !/^[0-9a-f-]{36}\.[a-z0-9]+$/.test(meta.storedName)) fail(404, 'File not found');
-  const file = path.join(UPLOAD_DIR, meta.storedName);
+  const file = await ensureLocalFile(meta.storedName);
   let stat;
   try { stat = fs.statSync(file); } catch { fail(404, 'File not found'); }
   const headers = {
@@ -439,6 +512,7 @@ function studentGradeDetails(course, userId) {
 }
 
 async function api(req, res, url) {
+  await readyPromise;
   const method = req.method;
   const pathname = url.pathname;
   const user = getUser(req);
@@ -490,7 +564,7 @@ async function api(req, res, url) {
       : buffer.length >= 12 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP';
     if (!valid) fail(415, 'The avatar file does not match its image format');
     const previous = user.avatarFile;
-    const uploaded = saveUpload(buffer, req, extension);
+    const uploaded = await saveUpload(buffer, req, extension);
     user.avatarFile = uploaded;
     try { save(); } catch (error) { user.avatarFile = previous; removeUpload(uploaded); throw error; }
     removeUpload(previous);
@@ -502,7 +576,7 @@ async function api(req, res, url) {
     if (avatarMatch[1] !== user.id) fail(403, 'You cannot view another user’s avatar');
     const meta = user.avatarFile;
     if (!meta?.storedName || !/^[0-9a-f-]{36}\.(png|jpg|webp)$/.test(meta.storedName)) fail(404, 'Avatar not found');
-    const file = path.join(UPLOAD_DIR, meta.storedName);
+    const file = await ensureLocalFile(meta.storedName);
     let stat;
     try { stat = fs.statSync(file); } catch { fail(404, 'Avatar not found'); }
     res.writeHead(200, { 'Content-Type': meta.mimeType, 'Content-Length': stat.size, 'Content-Disposition': 'inline', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY' });
@@ -1177,7 +1251,7 @@ async function api(req, res, url) {
     const allowed = { 'application/pdf': '.pdf', 'application/msword': '.doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx', 'text/plain': '.txt', 'image/png': '.png', 'image/jpeg': '.jpg' };
     const extension = allowed[mime]; if (!extension) fail(415, 'Only PDF, Word, text, or image assignment files are supported');
     const buffer = await readBinary(req, MAX_ASSIGNMENT_FILE);
-    const upload = saveUpload(buffer, req, extension);
+    const upload = await saveUpload(buffer, req, extension);
     removeUpload(submission.file);
     if (submission.score != null) (submission.history ||= []).push({ score: submission.score, feedback: submission.feedback, submittedAt: submission.submittedAt, gradedAt: submission.gradedAt });
     Object.assign(submission, { file: upload, score: null, feedback: '', gradedAt: null, submittedAt: now() });
@@ -1319,7 +1393,7 @@ async function api(req, res, url) {
     if (!originalName.toLowerCase().endsWith(extension)) fail(415, 'File name does not match the declared format');
     if (folder.files.some(file => file.name.toLowerCase() === originalName.toLowerCase())) fail(409, 'A file with this name already exists in the folder');
     const buffer = await readBinary(req, MAX_RESOURCE_FILE);
-    const uploaded = saveUpload(buffer, req, extension);
+    const uploaded = await saveUpload(buffer, req, extension);
     const file = { id: id('resource'), ...uploaded, createdAt: now() };
     folder.files.push(file); course.updatedAt = now();
     try { save(); } catch (error) { folder.files.pop(); removeUpload(file); throw error; }
@@ -1338,6 +1412,7 @@ async function api(req, res, url) {
   if (match && method === 'GET') {
     const { course, lesson } = courseByLesson(match[1]); canStudy(user, course);
     const folder = folderById(lesson, match[2]);
+    await Promise.all((folder.files || []).map(f => ensureLocalFile(f.storedName)));
     return streamZip(res, folder.files || [], UPLOAD_DIR, folder.name);
   }
   match = pathname.match(/^\/api\/lessons\/([^/]+)\/video$/);
@@ -1351,7 +1426,7 @@ async function api(req, res, url) {
     const allowed = { 'video/mp4': '.mp4', 'video/webm': '.webm', 'video/ogg': '.ogv' };
     const extension = allowed[mime]; if (!extension) fail(415, 'Only MP4, WebM, or Ogg videos are supported');
     const buffer = await readBinary(req, MAX_VIDEO);
-    const upload = saveUpload(buffer, req, extension);
+    const upload = await saveUpload(buffer, req, extension);
     removeUpload(lesson.videoFile);
     lesson.videoFile = upload; lesson.type = 'video'; course.updatedAt = now(); save();
     return json(res, 200, { lesson: serializeCourse(course, user).lessons.find(l => l.id === lesson.id), course: serializeCourse(course, user) });
