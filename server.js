@@ -31,6 +31,86 @@ const resetAttempts = new Map();
 const DEFAULT_WEIGHTS = Object.freeze({ usual: 30, quiz: 20, midterm: 20, final: 30 });
 const GRADE_KEYS = Object.keys(DEFAULT_WEIGHTS);
 
+const TEACHER_POSITIONS = [
+  '校长',
+  '副校长',
+  '院长',
+  '副院长',
+  '教务处长',
+  '课题组长',
+  '教师'
+];
+const POSITION_RANK = {
+  '校长': 7,
+  '副校长': 6,
+  '院长': 5,
+  '副院长': 4,
+  '教务处长': 3,
+  '课题组长': 2,
+  '教师': 1
+};
+function normalizePosition(pos) {
+  const val = String(pos || '').trim();
+  return TEACHER_POSITIONS.includes(val) ? val : '教师';
+}
+function positionRankOf(u) {
+  if (!u || u.role !== 'teacher') return 0;
+  return POSITION_RANK[normalizePosition(u.position)] || 1;
+}
+// Determines whether viewer (teacher or admin) can inspect target user's profile/activity/courses
+function canInspectSubordinate(viewer, target) {
+  if (!viewer || !target || viewer.id === target.id) return true;
+  if (viewer.role === 'admin') return canAdminManage(viewer, target);
+  if (viewer.role !== 'teacher') return false;
+  if (viewer.schoolId && target.schoolId && viewer.schoolId !== target.schoolId) return false;
+  if (viewer.schoolId && !target.schoolId) return false;
+  const pos = normalizePosition(viewer.position);
+  if (pos === '教师') return false;
+  if (target.role === 'student') {
+    if (['校长', '副校长', '教务处长'].includes(pos)) return true;
+    if (['院长', '副院长'].includes(pos)) {
+      return Boolean(viewer.department && target.department === viewer.department);
+    }
+    if (pos === '课题组长') {
+      const myCourseIds = new Set(db.courses.filter(c => isCourseTeacher(viewer, c)).map(c => c.id));
+      return db.enrollments.some(e => e.userId === target.id && myCourseIds.has(e.courseId));
+    }
+    return false;
+  }
+  if (target.role === 'teacher') {
+    const vRank = positionRankOf(viewer);
+    const tRank = positionRankOf(target);
+    if (vRank <= tRank) return false;
+    if (['校长', '副校长', '教务处长'].includes(pos)) return true;
+    if (['院长', '副院长', '课题组长'].includes(pos)) {
+      return Boolean(viewer.department && target.department === viewer.department);
+    }
+    return false;
+  }
+  return false;
+}
+// Courses visible to a teacher for oversight/monitoring based on Chinese university governance rules
+function visibleCoursesForTeacher(teacher) {
+  const pos = normalizePosition(teacher.position);
+  return db.courses.filter(c => {
+    if (isCourseTeacher(teacher, c)) return true;
+    const tIds = courseTeacherIds(c);
+    const courseTeachers = tIds.map(tid => db.users.find(u => u.id === tid)).filter(Boolean);
+    if (teacher.schoolId) {
+      const sameSchool = c.schoolId === teacher.schoolId || courseTeachers.some(t => t.schoolId === teacher.schoolId);
+      if (!sameSchool) return false;
+    }
+    if (['校长', '副校长', '教务处长'].includes(pos)) return true;
+    if (['院长', '副院长'].includes(pos)) {
+      return Boolean(teacher.department && courseTeachers.some(t => t.department === teacher.department));
+    }
+    if (pos === '课题组长') {
+      return Boolean(teacher.department && courseTeachers.some(t => t.department === teacher.department && positionRankOf(t) < positionRankOf(teacher)));
+    }
+    return false;
+  });
+}
+
 function id(prefix) { return `${prefix}_${crypto.randomUUID()}`; }
 function now() { return new Date().toISOString(); }
 function newEnrollmentCode(existing) {
@@ -113,6 +193,7 @@ for (const user of db.users) {
   if (typeof user.grade !== 'string') { user.grade = ''; migrated = true; }
   if (typeof user.department !== 'string') { user.department = ''; migrated = true; }
   if (typeof user.major !== 'string') { user.major = ''; migrated = true; }
+  if (user.role === 'teacher' && !TEACHER_POSITIONS.includes(user.position)) { user.position = '教师'; migrated = true; }
   if (!user.accountId && user.studentId) { user.accountId = user.studentId; migrated = true; }
   if (user.role === 'admin' && !user.schoolId && !user.adminScope) { user.adminScope = 'global'; migrated = true; }
 }
@@ -220,7 +301,7 @@ function publicUser(user) {
   if (!user) return null;
   const school = db.schools.find(item => item.id === user.schoolId);
   const pendingSchool = user.pendingSchoolId ? db.schools.find(item => item.id === user.pendingSchoolId) : null;
-  return { id: user.id, role: user.role, name: user.name, email: user.email, studentId: user.studentId, accountId: user.accountId || user.studentId || null, gender: user.gender || '', grade: user.grade || '', department: user.department || '', major: user.major || '', active: user.active !== false,
+  return { id: user.id, role: user.role, name: user.name, email: user.email, studentId: user.studentId, accountId: user.accountId || user.studentId || null, gender: user.gender || '', grade: user.grade || '', department: user.department || '', major: user.major || '', position: user.role === 'teacher' ? normalizePosition(user.position) : '', positionRank: positionRankOf(user), active: user.active !== false,
     school: school ? { id: school.id, name: school.name, code: school.code } : null,
     pendingSchool: pendingSchool ? { id: pendingSchool.id, name: pendingSchool.name, code: pendingSchool.code } : null,
     avatarUrl: user.avatarFile ? '/api/profile/avatar/' + encodeURIComponent(user.id) : '' };
@@ -244,7 +325,14 @@ function isCourseTeacher(user, course) {
 }
 function canManageCourse(user, course) {
   if (!user || !course) return false;
-  if (user.role === 'teacher') return isCourseTeacher(user, course);
+  if (user.role === 'teacher') {
+    if (isCourseTeacher(user, course)) return true;
+    const pos = normalizePosition(user.position);
+    if (['校长', '副校长', '教务处长', '院长', '副院长', '课题组长'].includes(pos)) {
+      return visibleCoursesForTeacher(user).some(c => c.id === course.id);
+    }
+    return false;
+  }
   if (user.role === 'admin') {
     if (isGlobalAdmin(user)) return true;
     const teachers = courseTeacherIds(course).map(tid => db.users.find(u => u.id === tid)).filter(Boolean);
@@ -287,7 +375,8 @@ function serializeCourse(course, user) {
       : { ...lesson, content: '', videoUrl: '', videoFile: undefined, videoFileUrl: '' });
   const { enrollmentCode, ...publicCourse } = course;
   const announcements = canSeeLessonContent ? (course.announcements || []).slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))) : [];
-  return { ...publicCourse, teacherIds: tIds, ...(canManageCourse(user, course) ? { enrollmentCode } : {}), teacherName: teacherNames, lessons, announcements, ...p,
+  const oversight = canManageCourse(user, course);
+  return { ...publicCourse, teacherIds: tIds, canOversight: oversight, ...(oversight ? { enrollmentCode } : {}), teacherName: teacherNames, lessons, announcements, ...p,
     studentCount: db.enrollments.filter(e => e.courseId === course.id).length, quizAvailable: Boolean(quizByCourse(course.id)?.questions.length) };
 }
 function ensureCourseChatRoom(course) {
@@ -789,6 +878,7 @@ async function api(req, res, url) {
     '学校代码': 'schoolCode', 'schoolcode': 'schoolCode', 'school_code': 'schoolCode',
     '院系': 'department', '学院': 'department', 'department': 'department',
     '专业': 'major', 'major': 'major',
+    '职位': 'position', '职务': 'position', '岗位': 'position', 'position': 'position',
     '账号': 'accountId', 'accountid': 'accountId', 'account_id': 'accountId', 'account': 'accountId',
     '临时密码': 'password', '密码': 'password', 'password': 'password',
     '邮箱': 'email', 'email': 'email',
@@ -840,6 +930,7 @@ async function api(req, res, url) {
         const gender = safeText(rec.gender ?? '', 'Gender', 30, false);
         const department = safeText(rec.department ?? '', 'Department', 80, false);
         const major = safeText(rec.major ?? '', 'Major', 80, false);
+        const position = targetRole === 'teacher' ? normalizePosition(rec.position) : '';
         let school = adminSchool;
         const codeInput = String(rec.schoolCode || '').trim();
         if (codeInput) {
@@ -886,7 +977,7 @@ async function api(req, res, url) {
         seenEmails.add(email);
         staged.push({
           id: id('user'), role: targetRole, name, email, studentId, accountId,
-          gender, department, major,
+          gender, department, major, ...(targetRole === 'teacher' ? { position } : {}),
           schoolId: school?.id || null,
           passwordHash: hashPassword(password),
           active: true, createdAt: now(),
@@ -2005,8 +2096,20 @@ async function api(req, res, url) {
     if (typeof body.password !== 'string' || body.password.length < 8 || body.password.length > 128) fail(400, 'Password must contain 8–128 characters');
     const accountId = body.accountId != null && body.accountId !== '' ? validateRoleAccountId('teacher', body.accountId) : null;
     if (accountId && accountIdTaken(accountId)) fail(409, 'This account ID is already registered');
-    const teacher = { id: id('user'), role: 'teacher', name, email, studentId: null, accountId, schoolId: isGlobalAdmin(user) ? null : user.schoolId, passwordHash: hashPassword(body.password), active: true, createdAt: now() };
+    const position = normalizePosition(body.position);
+    const department = safeText(body.department ?? '', 'Department', 80, false);
+    const major = safeText(body.major ?? '', 'Major', 80, false);
+    const teacher = { id: id('user'), role: 'teacher', position, department, major, name, email, studentId: null, accountId, schoolId: isGlobalAdmin(user) ? null : user.schoolId, passwordHash: hashPassword(body.password), active: true, createdAt: now() };
     db.users.push(teacher); save(); return json(res, 201, { user: publicUser(teacher) });
+  }
+  let teacherPosMatch = pathname.match(/^\/api\/admin\/teachers\/([^/]+)\/position$/);
+  if (teacherPosMatch && method === 'PATCH') {
+    requireAdmin(user);
+    const teacher = db.users.find(u => u.id === teacherPosMatch[1] && u.role === 'teacher');
+    if (!teacher || !canAdminManage(user, teacher)) fail(404, 'Instructor account not found');
+    teacher.position = normalizePosition(body.position);
+    save();
+    return json(res, 200, { user: publicUser(teacher) });
   }
   let adminMatch = pathname.match(/^\/api\/admin\/teachers\/([^/]+)$/);
   if (adminMatch && method === 'DELETE') {
@@ -2448,9 +2551,53 @@ async function api(req, res, url) {
     if (post.authorId !== user.id && !canManageCourse(user, course)) fail(403, 'You can only delete your own discussion posts');
     db.posts = db.posts.filter(p => p.id !== post.id); save(); return json(res, 200, { ok: true });
   }
+  if (pathname === '/api/teacher/subordinates' && method === 'GET') {
+    requireRole(user, 'teacher');
+    const pos = normalizePosition(user.position);
+    const subTeachers = db.users
+      .filter(u => u.role === 'teacher' && u.id !== user.id && canInspectSubordinate(user, u))
+      .map(t => {
+        const tCourses = db.courses.filter(c => isCourseTeacher(t, c));
+        const tCourseIds = new Set(tCourses.map(c => c.id));
+        const tEnrolls = db.enrollments.filter(e => tCourseIds.has(e.courseId));
+        return {
+          ...publicUser(t),
+          courseCount: tCourses.length,
+          studentCount: new Set(tEnrolls.map(e => e.userId)).size,
+          courses: tCourses.map(c => ({ id: c.id, title: c.title, studentCount: db.enrollments.filter(e => e.courseId === c.id).length }))
+        };
+      })
+      .sort((a, b) => (b.positionRank - a.positionRank) || a.name.localeCompare(b.name));
+    const subStudents = db.users
+      .filter(u => u.role === 'student' && canInspectSubordinate(user, u))
+      .map(s => {
+        const sCourses = visibleCoursesForTeacher(user);
+        const details = sCourses.map(c => studentEnrollmentDetails(s, c)).filter(Boolean);
+        return {
+          ...publicUser(s),
+          enrollments: details,
+          avgProgress: details.length ? Math.round(details.reduce((acc, e) => acc + e.progress, 0) / details.length) : 0
+        };
+      });
+    const scopeDesc = pos === '校长' ? '全校所有副校长、院长、副院长、教务处长、课题组长、教师及全校学生'
+      : pos === '副校长' ? '全校分管院系院长、副院长、教务处长、课题组长、教师及学生'
+      : pos === '院长' ? `本院（${user.department || '未分配院系'}）副院长、课题组长、全体教师及本院学生`
+      : pos === '副院长' ? `本院（${user.department || '未分配院系'}）课题组长、教学教师及本院学生`
+      : pos === '教务处长' ? '全校教学运行、课题组长、任课教师及全校选课学情'
+      : pos === '课题组长' ? `本教研组/课题组（${user.department || '未分配院系'}）下属教师及所授课程学生`
+      : '本人所授课程及选课学生';
+    return json(res, 200, {
+      position: pos,
+      positionRank: positionRankOf(user),
+      scopeDescription: scopeDesc,
+      teachers: subTeachers,
+      students: subStudents,
+      courses: visibleCoursesForTeacher(user).map(c => serializeCourse(c, user))
+    });
+  }
   if (pathname === '/api/teacher/overview' && method === 'GET') {
     requireRole(user, 'teacher');
-    const courses = db.courses.filter(c => isCourseTeacher(user, c));
+    const courses = visibleCoursesForTeacher(user);
     const courseIds = new Set(courses.map(c => c.id));
     const enrollments = db.enrollments.filter(e => courseIds.has(e.courseId));
     const enrolledStudentIds = new Set(enrollments.map(e => e.userId));
@@ -2459,21 +2606,23 @@ async function api(req, res, url) {
     const courseStats = courses.map(c => {
       const e = enrollments.filter(x => x.courseId === c.id);
       const a = attempts.filter(x => x.courseId === c.id);
-      return { id: c.id, title: c.title, enrollments: e.length, avgProgress: e.length ? Math.round(e.reduce((s,x) => s + progressFor(x.userId,c).progress,0)/e.length) : 0, avgQuizScore: a.length ? Math.round(a.reduce((s,x) => s+x.percent,0)/a.length) : null };
+      const tNames = courseTeacherIds(c).map(tid => db.users.find(u => u.id === tid)?.name).filter(Boolean).join(', ');
+      return { id: c.id, title: c.title, teacherName: tNames, isMine: isCourseTeacher(user, c), enrollments: e.length, avgProgress: e.length ? Math.round(e.reduce((s,x) => s + progressFor(x.userId,c).progress,0)/e.length) : 0, avgQuizScore: a.length ? Math.round(a.reduce((s,x) => s+x.percent,0)/a.length) : null };
     });
     const avgCompletion = enrollments.length ? Math.round(enrollments.reduce((s,e) => s + progressFor(e.userId, courses.find(c => c.id === e.courseId)).progress,0)/enrollments.length) : 0;
     const avgQuizScore = attempts.length ? Math.round(attempts.reduce((s,a) => s+a.percent,0)/attempts.length) : null;
     const recent = db.activity.filter(a => courseIds.has(a.courseId)).slice(0,10).map(a => ({ ...a, userName: db.users.find(u => u.id === a.userId)?.name || 'User', courseTitle: courses.find(c => c.id === a.courseId)?.title || '' }));
-    return json(res, 200, { stats: { totalStudents: students.length, totalCourses: courses.length, totalEnrollments: enrollments.length, avgCompletion, avgQuizScore }, courses: courseStats, recentActivity: recent });
+    const subordinateCount = db.users.filter(u => u.role === 'teacher' && u.id !== user.id && canInspectSubordinate(user, u)).length;
+    return json(res, 200, { position: normalizePosition(user.position), stats: { totalStudents: students.length, totalCourses: courses.length, totalEnrollments: enrollments.length, avgCompletion, avgQuizScore, subordinateCount }, courses: courseStats, recentActivity: recent });
   }
   if (pathname === '/api/teacher/students' && method === 'GET') {
     requireRole(user, 'teacher');
-    const courses = db.courses.filter(c => isCourseTeacher(user, c));
+    const courses = visibleCoursesForTeacher(user);
     const courseIds = new Set(courses.map(c => c.id));
     const enrolledStudentIds = new Set(db.enrollments.filter(e => courseIds.has(e.courseId)).map(e => e.userId));
-    const students = db.users.filter(u => u.role === 'student' && enrolledStudentIds.has(u.id)).map(u => {
+    const students = db.users.filter(u => u.role === 'student' && (enrolledStudentIds.has(u.id) || canInspectSubordinate(user, u))).map(u => {
       const details = courses.map(c => studentEnrollmentDetails(u,c)).filter(Boolean);
-      return { id: u.id, name: u.name, email: u.email, studentId: u.studentId, enrollments: details,
+      return { id: u.id, name: u.name, email: u.email, studentId: u.studentId, department: u.department || '', major: u.major || '', enrollments: details,
         avgProgress: details.length ? Math.round(details.reduce((s,e) => s+e.progress,0)/details.length) : 0,
         lastActiveAt: details.map(e => e.lastActiveAt).filter(Boolean).sort().at(-1) || null };
     });

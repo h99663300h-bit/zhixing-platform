@@ -14,7 +14,7 @@
   let courseEditItem = null;
   let courseStudentsModal = null;
   let courseFilter = { q: '', department: '', teacherId: '' };
-  let teacherFilter = { q: '', department: '', major: '', status: '' };
+  let teacherFilter = { q: '', department: '', major: '', status: '', position: '' };
   let studentFilter = { q: '', department: '', major: '', gender: '' };
 
   if (resetToken) {
@@ -91,6 +91,21 @@
     if (!q) return true;
     const hay = [item.name, item.accountId, item.studentId, item.email, item.department, item.major, item.school?.name, item.school?.code].filter(Boolean).join(' ').toLowerCase();
     return hay.includes(q.toLowerCase());
+  }
+
+  const TEACHER_POSITIONS = ['校长', '副校长', '院长', '副院长', '教务处长', '课题组长', '教师'];
+  const POSITION_BADGE_COLORS = {
+    '校长': 'background:#fef3c7;color:#b45309;border:1px solid #fcd34d',
+    '副校长': 'background:#ffedd5;color:#c2410c;border:1px solid #fdba74',
+    '院长': 'background:#ede9fe;color:#6d28d9;border:1px solid #c4b5fd',
+    '副院长': 'background:#e0e7ff;color:#4338ca;border:1px solid #a5b4fc',
+    '教务处长': 'background:#dcfce7;color:#15803d;border:1px solid #86efac',
+    '课题组长': 'background:#cffafe;color:#0e7490;border:1px solid #67e8f9',
+    '教师': 'background:#f1f5f9;color:#475569;border:1px solid #cbd5e1'
+  };
+  function positionOptionsHtml(selected) {
+    const cur = TEACHER_POSITIONS.includes(selected) ? selected : '教师';
+    return TEACHER_POSITIONS.map(p => '<option value="' + p + '"' + (cur === p ? ' selected' : '') + '>' + p + '</option>').join('');
   }
 
   const ANN_CATEGORIES = { school: 'School Information (学校信息)', college: 'College Information (学院信息)', academic: 'Academic Affairs (教务管理)' };
@@ -205,6 +220,7 @@
       if (teacherFilter.major && (t.major || '') !== teacherFilter.major) return false;
       if (teacherFilter.status === 'active' && !t.active) return false;
       if (teacherFilter.status === 'inactive' && t.active) return false;
+      if (teacherFilter.position && (t.position || '教师') !== teacherFilter.position) return false;
       return true;
     });
     const pendingSection = pending.length
@@ -226,20 +242,26 @@
     const filterBar = '<div class="filter-line" style="padding:0 20px 14px"><div class="searchbar"><span>⌕</span><input id="teacher-filter-q" data-admin-filter="teacher-q" type="search" value="' + esc(teacherFilter.q) + '" placeholder="Search name, account ID, email, department, major"></div>' +
       '<div class="row wrap"><select data-admin-filter="teacher-department" aria-label="Filter by department"><option value="">All Departments</option>' + depts.map(d => '<option value="' + esc(d) + '"' + (teacherFilter.department === d ? ' selected' : '') + '>' + esc(d) + '</option>').join('') + '</select>' +
       '<select data-admin-filter="teacher-major" aria-label="Filter by major"><option value="">All Majors</option>' + majors.map(m => '<option value="' + esc(m) + '"' + (teacherFilter.major === m ? ' selected' : '') + '>' + esc(m) + '</option>').join('') + '</select>' +
-      '<select data-admin-filter="teacher-status" aria-label="Filter by status"><option value="">All Statuses</option><option value="active"' + (teacherFilter.status === 'active' ? ' selected' : '') + '>Active</option><option value="inactive"' + (teacherFilter.status === 'inactive' ? ' selected' : '') + '>Inactive</option></select></div></div>';
+      '<select data-admin-filter="teacher-position" aria-label="按职位筛选"><option value="">所有职位 (All Positions)</option>' + TEACHER_POSITIONS.map(p => '<option value="' + p + '"' + (teacherFilter.position === p ? ' selected' : '') + '>' + p + '</option>').join('') + '</select>' +
+      '<select data-admin-filter="teacher-status" aria-label="Filter by status"><option value="">所有账号状态</option><option value="active"' + (teacherFilter.status === 'active' ? ' selected' : '') + '>在职/正常</option><option value="inactive"' + (teacherFilter.status === 'inactive' ? ' selected' : '') + '>已停用</option></select></div></div>';
     const rows = teachers.map(t => '<tr><td><strong>' + esc(t.name) + '</strong>' + (t.gender ? ' <span class="tiny muted">(' + esc(t.gender) + ')</span>' : '') + '<br><span class="muted">' + esc(t.email) + '</span></td>' +
       '<td>' + esc(t.accountId || '—') + '</td><td>' + esc(t.school?.name || 'Unassigned') + '</td>' +
       '<td>' + esc([t.department, t.major].filter(Boolean).join(' · ') || '—') + '</td>' +
-      '<td>' + (t.active ? '<span class="pill green">Active</span>' : '<span class="pill gray">Inactive</span>') + '</td><td>' + n(t.courseCount) + '</td><td>' +
+      '<td><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+        '<select data-admin-teacher-pos="' + esc(t.id) + '" aria-label="设置教师职位" style="min-height:32px;padding:4px 8px;font-size:12px;font-weight:700;border-radius:8px;width:auto;' + (POSITION_BADGE_COLORS[t.position || '教师'] || '') + '">' + positionOptionsHtml(t.position || '教师') + '</select>' +
+        (t.active ? '' : '<span class="pill gray">已停用</span>') +
+      '</div></td><td>' + n(t.courseCount) + '</td><td>' +
       (t.active ? '<div class="row wrap"><button type="button" class="btn btn-light btn-sm" data-admin-action="assign-dept" data-id="' + esc(t.id) + '" data-role="teacher">Assign Dept</button><button type="button" class="btn btn-soft btn-sm" data-admin-action="password" data-id="' + esc(t.id) + '" data-role="teacher">Reset Password</button>' +
       '<button type="button" class="btn btn-danger btn-sm" data-admin-action="remove-teacher" data-id="' + esc(t.id) + '">Deactivate</button></div>' : '<div class="row wrap"><button type="button" class="btn btn-soft btn-sm" data-admin-action="restore-teacher" data-id="' + esc(t.id) + '">Restore</button><button type="button" class="btn btn-danger btn-sm" data-admin-action="delete-teacher-permanent" data-id="' + esc(t.id) + '">Delete</button></div>') + '</td></tr>').join('');
     return pendingSection + departmentPanel() + importSection + '<section class="panel panel-pad" style="margin-bottom:20px"><h2>Add an Instructor</h2><p class="small muted">Create a separate login for each instructor.</p>' +
-      '<form id="admin-add-teacher"><div class="form-grid"><div class="field"><label for="admin-teacher-name">Name</label><input id="admin-teacher-name" name="name" required maxlength="60"></div>' +
-      '<div class="field"><label for="admin-teacher-email">Email</label><input id="admin-teacher-email" name="email" type="email" placeholder="teacher@example.com" required></div>' +
-      '<div class="field"><label for="admin-teacher-password">Temporary Password</label><input id="admin-teacher-password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></div></div>' +
-      '<button type="submit" class="btn btn-primary">Create Instructor Account</button></form></section>' +
+      '<form id="admin-add-teacher"><div class="form-grid"><div class="field"><label for="admin-teacher-name">姓名 (Name) *</label><input id="admin-teacher-name" name="name" required maxlength="60" placeholder="例如：吴彦祖"></div>' +
+      '<div class="field"><label for="admin-teacher-email">电子邮件 (Email) *</label><input id="admin-teacher-email" name="email" type="email" placeholder="teacher@example.com" required></div>' +
+      '<div class="field"><label for="admin-teacher-position">职务 / 职位 (Position)</label><select id="admin-teacher-position" name="position">' + positionOptionsHtml('教师') + '</select></div>' +
+      '<div class="field"><label for="admin-teacher-dept">所属院系 (Department)</label><input id="admin-teacher-dept" name="department" list="admin-add-teacher-dept-list" maxlength="80" placeholder="可选，如：计算机学院"><datalist id="admin-add-teacher-dept-list">' + (adminData?.departments || []).map(d => '<option value="' + esc(d.name) + '">').join('') + '</datalist></div>' +
+      '<div class="field"><label for="admin-teacher-password">临时密码 (Temporary Password) *</label><input id="admin-teacher-password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required placeholder="至少8位字符"></div></div>' +
+      '<button type="submit" class="btn btn-primary">创建教师账户</button></form></section>' +
       '<section class="panel"><div class="panel-pad"><h2>Instructor Accounts <span class="pill blue">' + teachers.length + ' / ' + allTeachers.length + '</span></h2><p class="small muted">Deactivate an account to prevent sign-in while retaining its courses and records.</p></div>' +
-      filterBar + '<div class="table-wrap"><table class="data-table"><thead><tr><th>Instructor</th><th>Account ID</th><th>School</th><th>Dept / Major</th><th>Status</th><th>Courses</th><th>Actions</th></tr></thead><tbody>' +
+      filterBar + '<div class="table-wrap"><table class="data-table"><thead><tr><th>Instructor</th><th>Account ID</th><th>School</th><th>Dept / Major</th><th>职位 (Position)</th><th>Courses</th><th>Actions</th></tr></thead><tbody>' +
       (rows || '<tr><td colspan="7">No matching instructor accounts.</td></tr>') + '</tbody></table></div></section>';
   }
 
@@ -581,7 +603,7 @@
       }, 'Could not update department: ');
       return;
     }
-    if (form.id === 'admin-announcement-form','admin-backup-merge-form','admin-course-form') {
+    if (form.id === 'admin-announcement-form') {
       const editId = form.dataset.id;
       run(async () => {
         if (editId) {
@@ -596,9 +618,9 @@
     }
     if (form.id === 'admin-add-teacher') {
       run(async () => {
-        await api('/api/admin/teachers', {method:'POST',body:JSON.stringify({name:values.name,email:values.email,password:values.password})});
-        adminData = await api('/api/admin/overview'); render(); showToast('Instructor account created');
-      }, 'Could not create instructor: ');
+        await api('/api/admin/teachers', {method:'POST',body:JSON.stringify({name:values.name,email:values.email,password:values.password,position:values.position||'教师',department:values.department||''})});
+        adminData = await api('/api/admin/overview'); render(); showToast('教师账户创建成功');
+      }, '创建教师失败: ');
       return;
     }
     if (form.id === 'admin-password-form') {
@@ -627,6 +649,7 @@
     else if (key === 'teacher-department') teacherFilter.department = val;
     else if (key === 'teacher-major') teacherFilter.major = val;
     else if (key === 'teacher-status') teacherFilter.status = val;
+    else if (key === 'teacher-position') teacherFilter.position = val;
     else if (key === 'student-q') studentFilter.q = val;
     else if (key === 'student-department') studentFilter.department = val;
     else if (key === 'student-major') studentFilter.major = val;
@@ -646,6 +669,17 @@
     if (event.target.dataset?.adminFilter && event.target.type === 'search') applyAdminFilter(event.target, true);
   });
   document.addEventListener('change', event => {
+    const teacherId = event.target.dataset?.adminTeacherPos;
+    if (teacherId) {
+      const position = event.target.value;
+      run(async () => {
+        await api('/api/admin/teachers/' + encodeURIComponent(teacherId) + '/position', { method: 'PATCH', body: JSON.stringify({ position }) });
+        adminData = await api('/api/admin/overview');
+        render();
+        showToast('已更新该教师职位为：' + position);
+      }, '更新职位失败: ');
+      return;
+    }
     if (event.target.dataset?.adminFilter && event.target.tagName === 'SELECT') applyAdminFilter(event.target, false);
   });
 })();
