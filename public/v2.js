@@ -139,7 +139,7 @@
       const code = '<div class="course-code"><span>Enrollment code for this course</span><strong>' + esc(state.selectedCourse.enrollmentCode || 'Not generated') + '</strong><small>Share this code only with students in this course</small></div>';
       html = html.replace('<div class="detail-layout">', code + courseFilesCard + '<div class="detail-layout">');
     } else {
-      html = html.replace('<div class="detail-layout">', courseFilesCard + '<div class="detail-layout">'); else {
+      html = html.replace('<div class="detail-layout">', courseFilesCard + '<div class="detail-layout">');
       html = html.replaceAll('data-action="enroll"', 'data-action="show-enroll-code"');
       if (state.selectedCourse.enrolled) html = html.replace('<div class="detail-layout">', '<div class="row" style="justify-content:flex-end;margin:10px 0 16px"><button class="btn btn-danger btn-sm" data-action="unenroll" data-id="' + esc(state.selectedCourse.id) + '">Withdraw from This Course</button></div><div class="detail-layout">');
     }
