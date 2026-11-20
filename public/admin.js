@@ -159,6 +159,7 @@
       '<div class="field"><label for="admin-course-code">Enrollment Code (optional)</label><input id="admin-course-code" name="enrollmentCode" value="' + esc(editing?.enrollmentCode || '') + '" maxlength="20" placeholder="Leave blank to auto-generate"></div></div>' +
       '<div class="field"><label for="admin-course-desc">Description *</label><textarea id="admin-course-desc" name="description" rows="2" maxlength="2000" placeholder="Course goals and overview…" required>' + esc(editing?.description || '') + '</textarea></div>' +
       '<div class="field"><label>Assign Instructor(s) * (multi-select)</label>' + teacherCheckboxes + '</div>' +
+      '<div class="field"><label for="admin-course-files">上传课程资料 / 课件文件（可选，支持多选任意格式）</label><input id="admin-course-files" type="file" multiple><div class="field-hint">支持 PDF、Word、PPT、Excel、音视频、图片、压缩包、代码等（单文件最大 80 MB）。</div></div>' +
       '<div class="row wrap"><button type="submit" class="btn btn-primary">' + (editing ? 'Save Course Changes' : 'Create Course') + '</button>' +
       (editing ? '<button type="button" class="btn btn-light" data-admin-action="cancel-edit-course">Cancel</button>' : '') + '</div></form></section>';
     const filterBar = '<div class="filter-line" style="padding:0 20px 14px"><div class="searchbar"><span>⌕</span><input id="course-filter-q" data-admin-filter="course-q" type="search" value="' + esc(courseFilter.q) + '" placeholder="Search course, code, category, instructor"></div>' +
@@ -278,12 +279,29 @@
       if (studentFilter.gender && (s.gender || '') !== studentFilter.gender) return false;
       return true;
     });
-    const importSection = '<section class="panel panel-pad" style="margin-bottom:20px"><div class="row-between wrap"><div><h2>Bulk Import Students</h2>' +
-      '<p class="small muted">Download the CSV template, fill in student rows (role, name, gender, studentId, schoolCode, department, major, accountId, password), and import to auto-register accounts.</p></div>' +
-      '<a class="btn btn-light btn-sm" href="/api/admin/import/template?role=student" download="student-import-template.csv">⬇ Download Student Template (.csv)</a></div>' +
-      '<form id="admin-import-student-form" style="margin-top:12px"><div class="row wrap">' +
-      '<input id="admin-import-student-file" type="file" accept=".csv,text/csv" required>' +
-      '<button type="submit" class="btn btn-primary btn-sm">Import Student Roster</button></div></form></section>';
+    const defaultSchoolCode = esc(adminData?.organization?.code || '1008611');
+    const importSection = '<section class="panel panel-pad" style="margin-bottom:20px"><div class="row-between wrap"><div><h2>批量导入学生（支持表格文件 / 在线表格填写）</h2>' +
+      '<p class="small muted">可下载表格模板填写后上传，也可直接在下方<strong>交互式表格</strong>中逐行填写或从 Excel 复制粘贴后一键导入。</p></div>' +
+      '<div class="row wrap" style="gap:8px"><a class="btn btn-light btn-sm" href="/api/admin/import/template?role=student" download="student-import-template.csv">⬇ 下载学生表格模板 (.csv)</a>' +
+      '<button type="button" class="btn btn-soft btn-sm" data-admin-action="add-student-grid-row">+ 添加一行表格</button></div></div>' +
+      '<form id="admin-import-student-form" style="margin-top:14px">' +
+      '<div class="table-wrap" style="margin-bottom:14px;border:1px solid var(--border);border-radius:12px;padding:8px;background:#fafbfe">' +
+      '<table class="data-table" id="student-import-grid"><thead><tr><th>身份</th><th>姓名 *</th><th>性别</th><th>学号 *</th><th>学校代码</th><th>院系</th><th>专业</th><th>登录账号(可选)</th><th>初始密码(≥8位) *</th><th>操作</th></tr></thead><tbody>' +
+      '<tr><td><input name="g_role" value="student" style="min-width:74px;min-height:34px;padding:6px 8px"></td>' +
+      '<td><input name="g_name" placeholder="如：白大海" style="min-width:95px;min-height:34px;padding:6px 8px"></td>' +
+      '<td><input name="g_gender" placeholder="男/女" style="min-width:68px;min-height:34px;padding:6px 8px"></td>' +
+      '<td><input name="g_studentId" placeholder="如：20260101" style="min-width:105px;min-height:34px;padding:6px 8px"></td>' +
+      '<td><input name="g_schoolCode" value="' + defaultSchoolCode + '" style="min-width:95px;min-height:34px;padding:6px 8px"></td>' +
+      '<td><input name="g_department" placeholder="如：计算机学院" style="min-width:110px;min-height:34px;padding:6px 8px"></td>' +
+      '<td><input name="g_major" placeholder="如：教育技术学" style="min-width:110px;min-height:34px;padding:6px 8px"></td>' +
+      '<td><input name="g_accountId" placeholder="默认同上" style="min-width:95px;min-height:34px;padding:6px 8px"></td>' +
+      '<td><input name="g_password" type="text" placeholder="至少8位密码" style="min-width:110px;min-height:34px;padding:6px 8px"></td>' +
+      '<td><button type="button" class="btn btn-danger btn-sm" data-admin-action="remove-grid-row">删</button></td></tr>' +
+      '</tbody></table></div>' +
+      '<div class="row wrap" style="gap:10px;align-items:center">' +
+      '<span class="small muted">或选择表格文件（.csv / .txt / .tsv）：</span>' +
+      '<input id="admin-import-student-file" type="file" accept=".csv,.txt,.tsv,text/csv,text/plain" style="max-width:260px">' +
+      '<button type="submit" class="btn btn-primary btn-sm">导入学生名册</button></div></form></section>';
     const filterBar = '<div class="filter-line" style="margin-bottom:16px"><div class="searchbar"><span>⌕</span><input id="student-filter-q" data-admin-filter="student-q" type="search" value="' + esc(studentFilter.q) + '" placeholder="Search name, student ID, email, department, major"></div>' +
       '<div class="row wrap"><select data-admin-filter="student-department" aria-label="Filter by department"><option value="">All Departments</option>' + depts.map(d => '<option value="' + esc(d) + '"' + (studentFilter.department === d ? ' selected' : '') + '>' + esc(d) + '</option>').join('') + '</select>' +
       '<select data-admin-filter="student-major" aria-label="Filter by major"><option value="">All Majors</option>' + majors.map(m => '<option value="' + esc(m) + '"' + (studentFilter.major === m ? ' selected' : '') + '>' + esc(m) + '</option>').join('') + '</select>' +
@@ -453,6 +471,32 @@
       run(async () => { await api('/api/admin/announcements/' + encodeURIComponent(button.dataset.id), {method:'DELETE'}); if (annEditItem?.id === button.dataset.id) annEditItem = null; adminData = await api('/api/admin/overview'); render(); showToast('Announcement deleted'); }, 'Could not delete announcement: ');
       return;
     }
+    if (action === 'add-student-grid-row') {
+      const tbody = document.querySelector('#student-import-grid tbody');
+      if (tbody) {
+        const sc = esc(adminData?.organization?.code || '1008611');
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td><input name="g_role" value="student" style="min-width:74px;min-height:34px;padding:6px 8px"></td>' +
+          '<td><input name="g_name" placeholder="姓名" style="min-width:95px;min-height:34px;padding:6px 8px"></td>' +
+          '<td><input name="g_gender" placeholder="男/女" style="min-width:68px;min-height:34px;padding:6px 8px"></td>' +
+          '<td><input name="g_studentId" placeholder="纯数字学号" style="min-width:105px;min-height:34px;padding:6px 8px"></td>' +
+          '<td><input name="g_schoolCode" value="' + sc + '" style="min-width:95px;min-height:34px;padding:6px 8px"></td>' +
+          '<td><input name="g_department" placeholder="院系" style="min-width:110px;min-height:34px;padding:6px 8px"></td>' +
+          '<td><input name="g_major" placeholder="专业" style="min-width:110px;min-height:34px;padding:6px 8px"></td>' +
+          '<td><input name="g_accountId" placeholder="默认同上" style="min-width:95px;min-height:34px;padding:6px 8px"></td>' +
+          '<td><input name="g_password" type="text" placeholder="至少8位密码" style="min-width:110px;min-height:34px;padding:6px 8px"></td>' +
+          '<td><button type="button" class="btn btn-danger btn-sm" data-admin-action="remove-grid-row">删</button></td>';
+        tbody.appendChild(tr);
+      }
+      return;
+    }
+    if (action === 'remove-grid-row') {
+      const tr = button.closest('tr');
+      const tbody = tr?.parentElement;
+      if (tr && tbody && tbody.children.length > 1) tr.remove();
+      else if (tr) tr.querySelectorAll('input').forEach(inp => { if (inp.name !== 'g_role' && inp.name !== 'g_schoolCode') inp.value = ''; });
+      return;
+    }
     if (action === 'reload') { adminError = ''; adminData = null; render(); return; }
     if (action === 'logout') {
       run(async () => { await api('/api/auth/logout', {method:'POST'}); state.user = null; state.authRole = 'student'; state.authMode = 'login'; adminData = null; adminDialog = null; render(); showToast('You have signed out'); });
@@ -548,14 +592,36 @@
       const role = form.id === 'admin-import-student-form' ? 'student' : 'teacher';
       const fileInput = form.querySelector('input[type="file"]');
       const file = fileInput?.files?.[0];
-      if (!file) { showToast('Please choose a CSV file first', true); return; }
+      let csvText = '';
+      if (file) {
+        csvText = await file.text();
+      } else if (role === 'student') {
+        const gridRows = [...form.querySelectorAll('#student-import-grid tbody tr')];
+        const escCell = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+        const lines = ['身份信息,名字,性别,学号,学校代码,院系,专业,账号,临时密码'];
+        for (const tr of gridRows) {
+          const vals = [...tr.querySelectorAll('input')].map(inp => inp.value.trim());
+          // vals: [role, name, gender, studentId, schoolCode, department, major, accountId, password]
+          const hasAny = vals.slice(1).some(Boolean);
+          if (!hasAny) continue;
+          const rowVals = [vals[0] || 'student', vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], vals[8]];
+          lines.push(rowVals.map(escCell).join(','));
+        }
+        if (lines.length < 2) {
+          showToast('请先选择表格文件，或在上方表格中填写至少一名学生的姓名、学号与密码', true);
+          return;
+        }
+        csvText = lines.join('\n');
+      } else {
+        showToast('请先选择 CSV 表格文件', true);
+        return;
+      }
       run(async () => {
-        const csv = await file.text();
-        const result = await api('/api/admin/import', { method: 'POST', body: JSON.stringify({ role, csv }) });
+        const result = await api('/api/admin/import', { method: 'POST', body: JSON.stringify({ role, csv: csvText }) });
         adminData = await api('/api/admin/overview');
         render();
-        showToast('Imported ' + n(result.importedCount) + ' ' + role + ' account(s)');
-      }, 'Import failed: ');
+        showToast('成功导入 ' + n(result.importedCount) + ' 条' + (role === 'student' ? '学生' : '教师') + '名单！');
+      }, '导入失败：');
       return;
     }
     if (form.id === 'admin-backup-merge-form') {
@@ -578,13 +644,29 @@
       if (!teacherIds.length) { showToast('Select at least one instructor', true); return; }
       const editId = form.dataset.id;
       const payload = { title: values.title, category: values.category, description: values.description, teacherIds, ...(values.enrollmentCode?.trim() ? { enrollmentCode: values.enrollmentCode.trim() } : {}) };
+      const cFiles = Array.from(form.querySelector('#admin-course-files')?.files || []);
+      if (cFiles.some(f => f.size > 80 * 1024 * 1024)) { showToast('单个文件不能超过 80 MB', true); return; }
       run(async () => {
-        if (editId) await api('/api/admin/courses/' + encodeURIComponent(editId), { method: 'PATCH', body: JSON.stringify(payload) });
-        else await api('/api/admin/courses', { method: 'POST', body: JSON.stringify(payload) });
+        const res = editId
+          ? await api('/api/admin/courses/' + encodeURIComponent(editId), { method: 'PATCH', body: JSON.stringify(payload) })
+          : await api('/api/admin/courses', { method: 'POST', body: JSON.stringify(payload) });
+        const cid = res.course?.id || editId;
+        for (const f of cFiles) {
+          const resp = await fetch('/api/courses/' + encodeURIComponent(cid) + '/files', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': f.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(f.name) },
+            body: f
+          });
+          if (!resp.ok) {
+            const errData = await resp.json().catch(() => ({}));
+            throw new Error(errData.error || '文件上传失败');
+          }
+        }
         courseEditItem = null;
         adminData = await api('/api/admin/overview');
         render();
-        showToast(editId ? 'Course updated' : 'Course created');
+        showToast(editId ? 'Course updated' : (cFiles.length ? `课程创建成功，已上传 ${cFiles.length} 个文件` : 'Course created'));
       }, 'Could not save course: ');
       return;
     }
