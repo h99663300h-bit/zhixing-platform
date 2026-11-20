@@ -215,7 +215,7 @@ function migrateDb(target) {
   let changed = false;
   if (!Array.isArray(target.schools)) { target.schools = []; changed = true; }
   if (!target.scheduling || typeof target.scheduling !== 'object') { target.scheduling = {}; changed = true; }
-  for (const key of ['assignments', 'submissions', 'grades', 'departments', 'announcements', 'lessonQuizzes', 'lessonQuizAttempts']) {
+  for (const key of ['assignments', 'submissions', 'grades', 'departments', 'announcements']) {
     if (!Array.isArray(target[key])) { target[key] = []; changed = true; }
   }
   for (const user of (target.users || [])) {
@@ -2629,12 +2629,10 @@ async function api(req, res, url) {
       ownedCourse(user, course);
       if (method === 'DELETE') {
         const removedIds = (db.lessonQuizAttempts || []).filter(a => a.quizId === lessonQuizByLesson(lesson.id)?.id).map(a => a.id);
-        db.lessonQuizzes = (db.lessonQuizzes || []).filter(q => q.lessonId !== lesson.id);
-        db.lessonQuizAttempts = (db.lessonQuizAttempts || []).filter(a => !removedIds.includes(a.id));
+        db.lessonQuizzes = db.lessonQuizzes.filter(q => q.lessonId !== lesson.id);
+        db.lessonQuizAttempts = db.lessonQuizAttempts.filter(a => !removedIds.includes(a.id));
         save(); return json(res, 200, { ok: true });
       }
-      if (!Array.isArray(db.lessonQuizzes)) db.lessonQuizzes = [];
-      if (!Array.isArray(db.lessonQuizAttempts)) db.lessonQuizAttempts = [];
       const fields = validateLessonQuiz(body);
       let quiz = lessonQuizByLesson(lesson.id);
       if (!quiz) {
@@ -2667,7 +2665,6 @@ async function api(req, res, url) {
     }
     const percent = Math.round(correct / questions.length * 100);
     const attempt = { id: id('lqattempt'), quizId: quiz.id, courseId: course.id, lessonId: lesson.id, userId: user.id, setIndex, score: Math.round(score * 100) / 100, total: Math.round(total * 100) / 100, percent, correct, totalQuestions: questions.length, submittedAt: now() };
-    if (!Array.isArray(db.lessonQuizAttempts)) db.lessonQuizAttempts = [];
     db.lessonQuizAttempts.push(attempt);
     enrollment(user.id, course.id).lastActiveAt = now();
     recentActivity('quiz_submitted', user.id, course.id, `${lesson.title} · ${percent}%`);
