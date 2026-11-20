@@ -187,7 +187,7 @@ function ensureSeed() {
 let db = ensureSeed();
 let migrated = false;
 if (!Array.isArray(db.schools)) { db.schools = []; migrated = true; }
-for (const key of ['assignments', 'submissions', 'grades', 'departments', 'announcements']) if (!Array.isArray(db[key])) { db[key] = []; migrated = true; }
+for (const key of ['assignments', 'submissions', 'grades', 'departments', 'announcements', 'lessonQuizzes', 'lessonQuizAttempts']) if (!Array.isArray(db[key])) { db[key] = []; migrated = true; }
 for (const user of db.users) {
   if (typeof user.gender !== 'string') { user.gender = ''; migrated = true; }
   if (typeof user.grade !== 'string') { user.grade = ''; migrated = true; }
@@ -314,6 +314,70 @@ function canAdminManage(admin, target) { return isGlobalAdmin(admin) || Boolean(
 function invalidateSessions(userId) { for (const [key, session] of sessions) if (session.userId === userId) sessions.delete(key); }
 function courseById(courseId) { const course = db.courses.find(c => c.id === courseId); if (!course) fail(404, 'Course not found'); return course; }
 function quizByCourse(courseId) { return db.quizzes.find(q => q.courseId === courseId) || null; }
+function lessonQuizByLesson(lessonId) { return (db.lessonQuizzes || []).find(q => q.lessonId === lessonId) || null; }
+function validateLessonQuiz(body) {
+  const questions = body?.questions;
+  if (!Array.isArray(questions) || questions.length === 0 || questions.length > 1000) fail(400, 'Lesson quiz must contain 1–1000 questions');
+  const seen = new Set();
+  const mapped = questions.map((q, index) => {
+    const text = safeText(q?.text, 'Question', 1000);
+    if (!Array.isArray(q.options) || q.options.length < 2 || q.options.length > 6) fail(400, 'Each question must have 2–6 options');
+    const options = q.options.map(o => safeText(o, 'Option', 500));
+    if (!Number.isInteger(q.correctIndex) || q.correctIndex < 0 || q.correctIndex >= options.length) fail(400, 'Invalid correct-answer index');
+    const setIndex = Number(q.setIndex ?? q.studentSet ?? 1);
+    if (!Number.isInteger(setIndex) || setIndex < 1 || setIndex > 25) fail(400, 'Question set index must be between 1 and 25');
+    const points = Number(q.points ?? 0.5);
+    if (!Number.isFinite(points) || points <= 0 || points > 10) fail(400, 'Question points must be between 0 and 10');
+    const qid = typeof q.id === 'string' && q.id.length < 100 ? q.id : id('lquestion');
+    if (seen.has(qid)) fail(400, 'Question IDs must be unique');
+    seen.add(qid);
+    return { id: qid, text, options, correctIndex: q.correctIndex, setIndex, points };
+  });
+  const counts = {};
+  for (const q of mapped) counts[q.setIndex] = (counts[q.setIndex] || 0) + 1;
+  for (let setIndex = 1; setIndex <= 25; setIndex += 1) {
+    if ((counts[setIndex] || 0) !== 20) fail(400, `Student set ${setIndex} must contain exactly 20 questions`);
+  }
+  const maxPoints = Number(body.maxPoints ?? 10);
+  if (!Number.isFinite(maxPoints) || maxPoints <= 0 || maxPoints > 100) fail(400, 'Lesson quiz maximum points must be between 0 and 100');
+  const title = safeText(body.title ?? '', 'Lesson quiz title', 150, false) || 'Lesson Check';
+  return { title, maxPoints, questions: mapped };
+}
+function serializeLessonQuiz(quiz, user, setIndex) {
+  if (!quiz) return null;
+  const teacher = ['teacher', 'admin'].includes(user?.role);
+  const questions = teacher ? quiz.questions : quiz.questions.filter(q => q.setIndex === setIndex);
+  return {
+    id: quiz.id, courseId: quiz.courseId, lessonId: quiz.lessonId, title: quiz.title,
+    maxPoints: quiz.maxPoints, totalQuestions: questions.length, updatedAt: quiz.updatedAt,
+    questions: questions.map(q => teacher ? { ...q } : { id: q.id, text: q.text, options: q.options, points: q.points })
+  };
+}
+function quizSetFor(user, course) {
+  const enrolled = enrollment(user.id, course.id);
+  if (!enrolled) fail(403, 'Enroll in the course first');
+  if (Number.isInteger(enrolled.quizSetIndex) && enrolled.quizSetIndex >= 1 && enrolled.quizSetIndex <= 25) return enrolled.quizSetIndex;
+  const used = new Set(db.enrollments.filter(e => e.courseId === course.id && Number.isInteger(e.quizSetIndex)).map(e => e.quizSetIndex));
+  let chosen = 0;
+  for (let i = 1; i <= 25; i += 1) if (!used.has(i)) { chosen = i; break; }
+  if (!chosen) fail(400, '本题库最多支持25名学生；如需更多学生，请先扩充题库');
+  enrolled.quizSetIndex = chosen;
+  save();
+  return chosen;
+}
+function lessonQuizScoreFor(course, userId) {
+  const quizzes = (db.lessonQuizzes || []).filter(q => q.courseId === course.id);
+  if (!quizzes.length) return null;
+  let total = 0;
+  let any = false;
+  for (const quiz of quizzes) {
+    const attempts = (db.lessonQuizAttempts || []).filter(a => a.quizId === quiz.id && a.userId === userId);
+    if (!attempts.length) continue;
+    any = true;
+    total += Math.max(...attempts.map(a => a.percent)) / 100 * Number(quiz.maxPoints || 10);
+  }
+  return any ? Math.min(100, Math.round(total * 100) / 100) : null;
+}
 function enrollment(userId, courseId) { return db.enrollments.find(e => e.userId === userId && e.courseId === courseId); }
 function courseTeacherIds(course) {
   const list = Array.isArray(course?.teacherIds) ? course.teacherIds.filter(Boolean) : [];
@@ -639,16 +703,17 @@ function gradeFor(course, userId) {
   const graded = db.assignments.filter(a => a.courseId === course.id).flatMap(a => db.submissions.filter(s => s.assignmentId === a.id && s.userId === userId && s.score != null).map(s => s.score / a.maxScore * 100));
   const assignmentAverage = graded.length ? Math.round(graded.reduce((sum, score) => sum + score, 0) / graded.length * 100) / 100 : null;
   const attempts = db.attempts.filter(a => a.courseId === course.id && a.userId === userId);
-  const quizBest = attempts.length ? Math.max(...attempts.map(a => a.percent)) : null;
+  const lessonQuizScore = lessonQuizScoreFor(course, userId);
+  const quizBest = lessonQuizScore ?? (attempts.length ? Math.max(...attempts.map(a => a.percent)) : null);
   const scores = {}, sources = {};
   for (const key of GRADE_KEYS) {
     const automatic = key === 'usual' ? assignmentAverage : key === 'quiz' ? quizBest : null;
     scores[key] = manual[key] ?? automatic;
-    sources[key] = manual[key] != null ? 'teacher' : automatic != null ? (key === 'usual' ? 'assignments' : 'quiz') : 'pending';
+    sources[key] = manual[key] != null ? 'teacher' : automatic != null ? (key === 'usual' ? 'assignments' : lessonQuizScore != null ? 'lesson-quizzes' : 'quiz') : 'pending';
   }
   const complete = GRADE_KEYS.every(key => !weights[key] || scores[key] != null);
   const total = complete ? Math.round(GRADE_KEYS.reduce((sum, key) => sum + (scores[key] ?? 0) * weights[key] / 100, 0) * 100) / 100 : null;
-  return { weights, scores, sources, total, assignmentAverage, quizBest };
+  return { weights, scores, sources, total, assignmentAverage, quizBest, lessonQuizScore };
 }
 function studentGradeDetails(course, userId) {
   const classmates = db.enrollments.filter(e => e.courseId === course.id && db.users.some(u => u.id === e.userId && u.role === 'student' && u.active !== false));
@@ -661,7 +726,11 @@ function studentGradeDetails(course, userId) {
   }).sort((a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt)));
   const quizTitle = quizByCourse(course.id)?.title || 'Course Quiz';
   const quizAttempts = db.attempts.filter(a => a.courseId === course.id && a.userId === userId).map(a => ({ id: a.id, title: quizTitle, score: a.score, total: a.total, percent: a.percent, submittedAt: a.submittedAt })).sort((a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt)));
-  return { classSize: classmates.length, rank, assignments, quizAttempts };
+  const lessonQuizAttempts = (db.lessonQuizAttempts || []).filter(a => a.courseId === course.id && a.userId === userId).map(a => {
+    const lesson = course.lessons.find(l => l.id === a.lessonId);
+    return { id: a.id, title: lesson?.title || 'Lesson Check', score: a.score, total: a.total, percent: a.percent, points: a.score, lessonId: a.lessonId, submittedAt: a.submittedAt };
+  }).sort((a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt)));
+  return { classSize: classmates.length, rank, assignments, quizAttempts: [...lessonQuizAttempts, ...quizAttempts], lessonQuizAttempts };
 }
 
 async function api(req, res, url) {
@@ -2354,6 +2423,9 @@ async function api(req, res, url) {
       db.grades = db.grades.filter(g => g.courseId !== course.id);
       db.courses = db.courses.filter(c => c.id !== course.id);
       db.quizzes = db.quizzes.filter(q => q.courseId !== course.id);
+      const lessonQuizIds = (db.lessonQuizzes || []).filter(q => q.courseId === course.id).map(q => q.id);
+      db.lessonQuizzes = (db.lessonQuizzes || []).filter(q => q.courseId !== course.id);
+      db.lessonQuizAttempts = (db.lessonQuizAttempts || []).filter(a => !lessonQuizIds.includes(a.quizId));
       db.enrollments = db.enrollments.filter(e => e.courseId !== course.id);
       db.attempts = db.attempts.filter(a => a.courseId !== course.id);
       db.posts = db.posts.filter(p => p.courseId !== course.id);
@@ -2540,6 +2612,65 @@ async function api(req, res, url) {
     e.lastActiveAt = now(); recentActivity('lesson_completed', user.id, course.id, course.lessons.find(l => l.id === match[1]).title); save();
     return json(res, 200, { course: serializeCourse(course, user) });
   }
+  match = pathname.match(/^\/api\/lessons\/([^/]+)\/quiz$/);
+  if (match) {
+    const { course, lesson } = courseByLesson(match[1]);
+    if (method === 'GET') {
+      canStudy(user, course);
+      const quiz = lessonQuizByLesson(lesson.id);
+      if (!quiz) return json(res, 200, { quiz: null, attempts: [] });
+      const setIndex = ['teacher', 'admin'].includes(user.role) ? null : quizSetFor(user, course);
+      const attempts = (db.lessonQuizAttempts || []).filter(a => a.quizId === quiz.id && a.userId === user.id)
+        .map(({ id: attemptId, score, total, percent, correct, totalQuestions, submittedAt }) => ({ id: attemptId, score, total, percent, correct, totalQuestions, submittedAt }))
+        .sort((a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt)));
+      return json(res, 200, { quiz: serializeLessonQuiz(quiz, user, setIndex), attempts });
+    }
+    if (['PUT', 'DELETE'].includes(method)) {
+      ownedCourse(user, course);
+      if (method === 'DELETE') {
+        const removedIds = (db.lessonQuizAttempts || []).filter(a => a.quizId === lessonQuizByLesson(lesson.id)?.id).map(a => a.id);
+        db.lessonQuizzes = db.lessonQuizzes.filter(q => q.lessonId !== lesson.id);
+        db.lessonQuizAttempts = db.lessonQuizAttempts.filter(a => !removedIds.includes(a.id));
+        save(); return json(res, 200, { ok: true });
+      }
+      const fields = validateLessonQuiz(body);
+      let quiz = lessonQuizByLesson(lesson.id);
+      if (!quiz) {
+        quiz = { id: id('lquiz'), courseId: course.id, lessonId: lesson.id, ...fields, createdAt: now(), updatedAt: now() };
+        db.lessonQuizzes.push(quiz);
+      } else {
+        Object.assign(quiz, fields, { updatedAt: now() });
+      }
+      save(); return json(res, 200, { quiz: serializeLessonQuiz(quiz, user, null) });
+    }
+  }
+  match = pathname.match(/^\/api\/lessons\/([^/]+)\/quiz\/submit$/);
+  if (match && method === 'POST') {
+    requireRole(user, 'student');
+    const { course, lesson } = courseByLesson(match[1]); canStudy(user, course);
+    const quiz = lessonQuizByLesson(lesson.id);
+    if (!quiz || !quiz.questions.length) fail(404, 'No quiz has been set up for this lesson');
+    const setIndex = quizSetFor(user, course);
+    const questions = quiz.questions.filter(q => q.setIndex === setIndex);
+    if (!questions.length) fail(400, 'No questions are assigned to your student set');
+    if (!Array.isArray(body.answers)) fail(400, 'Submit an array of answers');
+    const answerMap = new Map(body.answers.map(a => [a.questionId, a.optionIndex]));
+    let score = 0;
+    let total = 0;
+    let correct = 0;
+    for (const q of questions) {
+      const points = Number(q.points || 0);
+      total += points;
+      if (answerMap.get(q.id) === q.correctIndex) { score += points; correct += 1; }
+    }
+    const percent = Math.round(correct / questions.length * 100);
+    const attempt = { id: id('lqattempt'), quizId: quiz.id, courseId: course.id, lessonId: lesson.id, userId: user.id, setIndex, score: Math.round(score * 100) / 100, total: Math.round(total * 100) / 100, percent, correct, totalQuestions: questions.length, submittedAt: now() };
+    db.lessonQuizAttempts.push(attempt);
+    enrollment(user.id, course.id).lastActiveAt = now();
+    recentActivity('quiz_submitted', user.id, course.id, `${lesson.title} · ${percent}%`);
+    save();
+    return json(res, 201, { attempt });
+  }
   match = pathname.match(/^\/api\/courses\/([^/]+)\/quiz$/);
   if (match) {
     const course = courseById(match[1]); canStudy(user, course);
@@ -2709,6 +2840,7 @@ async function api(req, res, url) {
   fail(404, 'API endpoint not found');
 }
 
+const LESSON_QUIZ_FRONTEND = "\n/* LESSON_QUIZ_FRONTEND_PATCH - standalone, no dependency on v2.js internals */\n(() => {\n  if (window.__lessonQuizPatchLoaded) return;\n  window.__lessonQuizPatchLoaded = true;\n  state.lessonQuiz = null;\n  state.lessonQuizAttempts = [];\n  state.lessonQuizFor = null;\n  state.lessonQuizLoading = false;\n  state.lessonQuizShowForm = true;\n\n  const isTeacher = () => ['teacher', 'admin'].includes(state.user?.role);\n  const lessonById = id => state.selectedCourse?.lessons?.find(l => l.id === id);\n\n  function lessonQuizPanel(lessonId) {\n    if (state.lessonQuizFor !== lessonId || state.lessonQuizLoading) {\n      return '<div class=\"lesson-resources\" style=\"margin-top:14px;padding-top:14px\"><h4 style=\"margin:0 0 8px\">✅ 本节课检测</h4><p class=\"small muted\">Loading lesson check…</p></div>';\n    }\n    const quiz = state.lessonQuiz;\n    if (!quiz) {\n      return isTeacher() ? '<div class=\"lesson-resources\" style=\"margin-top:14px;padding-top:14px\"><div class=\"row-between\"><div><h4 style=\"margin:0 0 8px\">✅ 本节课检测</h4><p class=\"small muted\">这节课还没有配置检测题库。</p></div><button type=\"button\" class=\"btn btn-primary btn-sm\" data-action=\"import-lesson-quiz\" data-id=\"' + esc(lessonId) + '\">导入课时检测题库</button></div></div>' : '';\n    }\n    const attempts = state.lessonQuizAttempts || [];\n    const latest = attempts[0];\n    if (isTeacher()) {\n      return '<div class=\"lesson-resources\" style=\"margin-top:14px;padding-top:14px\"><div class=\"row-between wrap\"><div><h4 style=\"margin:0 0 8px\">✅ 本节课检测</h4><p class=\"small muted\" style=\"margin:0\">题库 ' + quiz.totalQuestions + ' 题 · 25 套独立卷 · 每套 20 题 · 满分 ' + quiz.maxPoints + ' 分</p></div><div class=\"row wrap\"><button type=\"button\" class=\"btn btn-soft btn-sm\" data-action=\"import-lesson-quiz\" data-id=\"' + esc(lessonId) + '\">导入/更新题库</button><button type=\"button\" class=\"btn btn-danger btn-sm\" data-action=\"delete-lesson-quiz\" data-id=\"' + esc(lessonId) + '\">删除检测</button></div></div></div>';\n    }\n    const header = '<h4 style=\"margin:0 0 8px\">✅ 本节课检测</h4><p class=\"small muted\" style=\"margin:0 0 12px\">共 ' + quiz.totalQuestions + ' 题，满分 ' + quiz.maxPoints + ' 分；提交后自动评分并计入课堂检测成绩。</p>';\n    if (!state.lessonQuizShowForm && latest) {\n      const history = attempts.slice(0, 5).map(a => '<div class=\"lesson-file-row\"><span>' + fmtDate(a.submittedAt) + ' · ' + a.correct + '/' + a.totalQuestions + ' 题正确</span><b>' + esc(a.score) + ' / ' + esc(a.total) + ' 分（' + a.percent + '%）</b></div>').join('');\n      return '<div class=\"lesson-resources\" style=\"margin-top:14px;padding-top:14px\">' + header + '<div class=\"panel\" style=\"padding:12px\"><strong>最近一次成绩：' + esc(latest.score) + ' / ' + esc(latest.total) + ' 分（' + latest.percent + '%）</strong></div><div style=\"margin-top:10px\">' + history + '</div><button type=\"button\" class=\"btn btn-soft btn-sm\" style=\"margin-top:12px\" data-action=\"retake-lesson-quiz\" data-id=\"' + esc(lessonId) + '\">重新作答</button></div>';\n    }\n    const questions = (quiz.questions || []).map((q, index) => {\n      const options = (q.options || []).map((opt, k) => '<label class=\"lesson-quiz-option\" style=\"display:block;margin:5px 0\"><input type=\"radio\" name=\"q-' + esc(q.id) + '\" value=\"' + k + '\" required> ' + String.fromCharCode(65 + k) + '. ' + esc(opt) + '</label>').join('');\n      return '<div class=\"lesson-quiz-question\" style=\"margin-bottom:14px\"><strong>' + (index + 1) + '. ' + esc(q.text) + '</strong><div style=\"margin-top:6px\">' + options + '</div></div>';\n    }).join('');\n    return '<form id=\"lesson-quiz-form\" class=\"lesson-resources\" data-lesson-id=\"' + esc(lessonId) + '\" style=\"margin-top:14px;padding-top:14px\">' + header + questions + '<button type=\"submit\" class=\"btn btn-primary btn-sm\">提交并自动评分</button></form>';\n  }\n\n  function lessonQuizImportModal() {\n    const lessonId = state.modal?.lessonId || state.activeLesson;\n    return '<div class=\"modal-backdrop\" data-action=\"close-modal\"><div class=\"modal wide\" role=\"dialog\" aria-modal=\"true\"><div class=\"modal-head\"><h2>导入课时检测题库</h2><button class=\"icon-btn\" type=\"button\" data-action=\"close-modal\" aria-label=\"Close\">✕</button></div><form id=\"lesson-quiz-import-form\" data-lesson-id=\"' + esc(lessonId) + '\"><div class=\"modal-body\"><p class=\"small muted\">粘贴题库 JSON，必须包含 25 套，每套 20 题。</p><div class=\"field\"><label for=\"lesson-quiz-json\">题库 JSON</label><textarea id=\"lesson-quiz-json\" rows=\"12\" required></textarea></div></div><div class=\"modal-actions\"><button class=\"btn btn-light\" type=\"button\" data-action=\"close-modal\">Cancel</button><button class=\"btn btn-primary\" type=\"submit\">保存题库</button></div></form></div></div>';\n  }\n\n  async function refreshLessonQuiz(lessonId) {\n    state.lessonQuizFor = lessonId;\n    state.lessonQuizLoading = true;\n    state.lessonQuiz = null;\n    state.lessonQuizAttempts = [];\n    state.lessonQuizShowForm = true;\n    if (state.activeLesson === lessonId) render();\n    try {\n      const data = await api('/api/lessons/' + encodeURIComponent(lessonId) + '/quiz');\n      if (state.lessonQuizFor !== lessonId) return;\n      state.lessonQuiz = data.quiz || null;\n      state.lessonQuizAttempts = data.attempts || [];\n    } finally {\n      if (state.lessonQuizFor === lessonId) {\n        state.lessonQuizLoading = false;\n        if (state.activeLesson === lessonId) render();\n      }\n    }\n  }\n\n  const baseLessonView = lessonView;\n  lessonView = function(course, lesson) {\n    let html = baseLessonView(course, lesson);\n    if (lesson && (isTeacher() || course.enrolled)) {\n      html = html.replace('</section>', lessonQuizPanel(lesson.id) + '</section>');\n    }\n    return html;\n  };\n\n  const baseModal = modal;\n  modal = function() {\n    if (state.modal?.type === 'lesson-quiz') return lessonQuizImportModal();\n    return baseModal();\n  };\n\n  document.addEventListener('click', event => {\n    const node = event.target.closest('[data-action]');\n    if (!node || !state.user) return;\n    const action = node.dataset.action;\n    const id = node.dataset.id;\n    if (action === 'open-lesson') {\n      setTimeout(() => { if (state.activeLesson === id) refreshLessonQuiz(id); }, 0);\n      return;\n    }\n    if (action === 'import-lesson-quiz') {\n      event.preventDefault(); event.stopImmediatePropagation();\n      state.modal = { type: 'lesson-quiz', lessonId: id };\n      render();\n      return;\n    }\n    if (action === 'delete-lesson-quiz') {\n      event.preventDefault(); event.stopImmediatePropagation();\n      if (!confirm('确定删除这节课的检测题库和所有作答记录吗？')) return;\n      run(async () => {\n        await api('/api/lessons/' + encodeURIComponent(id) + '/quiz', { method: 'DELETE' });\n        await refreshLessonQuiz(id);\n        showToast('课时检测已删除');\n      }, '删除失败: ');\n      return;\n    }\n    if (action === 'retake-lesson-quiz') {\n      event.preventDefault(); event.stopImmediatePropagation();\n      state.lessonQuizShowForm = true;\n      render();\n      return;\n    }\n  }, true);\n\n  document.addEventListener('submit', event => {\n    const form = event.target;\n    if (form.id === 'lesson-quiz-import-form') {\n      event.preventDefault(); event.stopImmediatePropagation();\n      const lessonId = form.dataset.lessonId;\n      let payload;\n      try { payload = JSON.parse(document.getElementById('lesson-quiz-json').value); }\n      catch (error) { showToast('JSON 格式不正确', true); return; }\n      run(async () => {\n        await api('/api/lessons/' + encodeURIComponent(lessonId) + '/quiz', { method: 'PUT', body: JSON.stringify(payload) });\n        state.modal = null;\n        await refreshLessonQuiz(lessonId);\n        showToast('课时检测题库已保存');\n      }, '保存课时检测失败: ');\n      return;\n    }\n    if (form.id === 'lesson-quiz-form') {\n      event.preventDefault(); event.stopImmediatePropagation();\n      const lessonId = form.dataset.lessonId;\n      const answers = Array.from(form.querySelectorAll('input[type=\"radio\"]:checked')).map(input => ({\n        questionId: input.name.slice(2),\n        optionIndex: Number(input.value)\n      }));\n      if (!answers.length) { showToast('请完成所有题目', true); return; }\n      run(async () => {\n        const data = await api('/api/lessons/' + encodeURIComponent(lessonId) + '/quiz/submit', { method: 'POST', body: JSON.stringify({ answers }) });\n        await refreshLessonQuiz(lessonId);\n        state.lessonQuizShowForm = false;\n        render();\n        showToast('已自动评分：' + data.attempt.score + ' / ' + data.attempt.total + ' 分（' + data.attempt.percent + '%）');\n      }, '提交检测失败: ');\n      return;\n    }\n  }, true);\n})();\n";
 const MIME = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8', '.svg':'image/svg+xml', '.png':'image/png', '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.ico':'image/x-icon', '.webp':'image/webp', '.woff2':'font/woff2', '.json':'application/json; charset=utf-8' };
 function staticFile(req, res, url) {
   if (!['GET','HEAD'].includes(req.method)) return json(res, 405, { error: 'Unsupported request method' });
@@ -2720,6 +2852,9 @@ function staticFile(req, res, url) {
   try { if (!fs.statSync(target).isFile()) target = path.join(PUBLIC, 'index.html'); } catch { target = path.join(PUBLIC, 'index.html'); }
   fs.readFile(target, (err, content) => {
     if (err) return json(res, 404, { error: 'Page not found' });
+    if (target.endsWith(path.sep + 'v2.js') && !content.includes('lessonQuizPanel')) {
+      content = Buffer.concat([content, Buffer.from(LESSON_QUIZ_FRONTEND, 'utf8')]);
+    }
     res.writeHead(200, { 'Content-Type': MIME[path.extname(target)] || 'application/octet-stream', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin' });
     res.end(req.method === 'HEAD' ? undefined : content);
   });
