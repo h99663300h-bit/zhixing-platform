@@ -290,6 +290,20 @@ function serializeCourse(course, user) {
   return { ...publicCourse, teacherIds: tIds, ...(canManageCourse(user, course) ? { enrollmentCode } : {}), teacherName: teacherNames, lessons, announcements, ...p,
     studentCount: db.enrollments.filter(e => e.courseId === course.id).length, quizAvailable: Boolean(quizByCourse(course.id)?.questions.length) };
 }
+function ensureCourseChatRoom(course) {
+  if (!Array.isArray(db.posts)) db.posts = [];
+  if (!db.posts.some(p => p.courseId === course.id && p.authorRole === 'system')) {
+    db.posts.unshift({
+      id: id('post'),
+      courseId: course.id,
+      authorId: 'system',
+      authorName: '班级群助手',
+      authorRole: 'system',
+      content: `🎉 欢迎加入《${course.title}》课程班级群！老师和同学们可以在这里随时发起讨论、提问答疑。`,
+      createdAt: now()
+    });
+  }
+}
 function recentActivity(kind, userId, courseId, detail) {
   db.activity.unshift({ id: id('activity'), kind, userId, courseId, detail, createdAt: now() });
   db.activity = db.activity.slice(0, 100);
@@ -1941,7 +1955,7 @@ async function api(req, res, url) {
       gradeWeights: { ...DEFAULT_WEIGHTS },
       lessons: [], announcements: [], createdAt: now(), updatedAt: now(),
     };
-    db.courses.push(course); save();
+    db.courses.push(course); ensureCourseChatRoom(course); save();
     return json(res, 201, { course: serializeCourse(course, user) });
   }
   let adminCourseMatch = pathname.match(/^\/api\/admin\/courses\/([^/]+)$/);
@@ -2070,7 +2084,7 @@ async function api(req, res, url) {
   if (pathname === '/api/courses' && method === 'POST') {
     requireRole(user, 'teacher');
     const course = { id: id('course'), ...courseFields(body), teacherId: user.id, lessons: [], createdAt: now(), updatedAt: now() };
-    db.courses.push(course); recentActivity('course_created', user.id, course.id, course.title); save();
+    db.courses.push(course); ensureCourseChatRoom(course); recentActivity('course_created', user.id, course.id, course.title); save();
     return json(res, 201, { course: serializeCourse(course, user) });
   }
   if (pathname === '/api/student/grades' && method === 'GET') {
@@ -2398,12 +2412,32 @@ async function api(req, res, url) {
   match = pathname.match(/^\/api\/courses\/([^/]+)\/discussions$/);
   if (match) {
     const course = courseById(match[1]); canStudy(user, course);
-    if (method === 'GET') return json(res, 200, { posts: db.posts.filter(p => p.courseId === course.id).slice().sort((a,b) => a.createdAt.localeCompare(b.createdAt)) });
+    if (method === 'GET') {
+      ensureCourseChatRoom(course);
+      const posts = db.posts
+        .filter(p => p.courseId === course.id)
+        .slice()
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+        .map(p => {
+          const author = db.users.find(u => u.id === p.authorId);
+          return {
+            ...p,
+            avatarUrl: author?.avatarFile ? `/api/profile/avatar/${encodeURIComponent(author.id)}` : ''
+          };
+        });
+      const memberCount = db.enrollments.filter(e => e.courseId === course.id).length + courseTeacherIds(course).length;
+      return json(res, 200, { posts, memberCount });
+    }
     if (method === 'POST') {
       const content = safeText(body.content, 'Discussion content', 2000);
       const post = { id: id('post'), courseId: course.id, authorId: user.id, authorName: user.name, authorRole: user.role, content, createdAt: now() };
       db.posts.push(post); recentActivity('discussion', user.id, course.id, content.slice(0, 80)); save();
-      return json(res, 201, { post });
+      return json(res, 201, {
+        post: {
+          ...post,
+          avatarUrl: user.avatarFile ? `/api/profile/avatar/${encodeURIComponent(user.id)}` : ''
+        }
+      });
     }
   }
   match = pathname.match(/^\/api\/courses\/([^/]+)\/discussions\/([^/]+)$/);
