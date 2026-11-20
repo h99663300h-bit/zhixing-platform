@@ -371,12 +371,13 @@ function serializeCourse(course, user) {
   const canSeeLessonContent = Boolean(user && ((user.role === 'student' && p.enrolled) || canManageCourse(user, course)));
   const lessons = [...course.lessons].sort((a, b) => a.order - b.order).map(lesson =>
     canSeeLessonContent
-      ? { ...lesson, videoFile: undefined, videoFileUrl: lesson.videoFile ? '/api/lessons/' + lesson.id + '/video' : '' }
-      : { ...lesson, content: '', videoUrl: '', videoFile: undefined, videoFileUrl: '' });
+      ? { ...lesson, videoFile: undefined, videoFileUrl: lesson.videoFile ? '/api/lessons/' + lesson.id + '/video' : '', files: (lesson.files || []).map(publicAttachment) }
+      : { ...lesson, content: '', videoUrl: '', videoFile: undefined, videoFileUrl: '', files: [] });
   const { enrollmentCode, ...publicCourse } = course;
+  const files = canSeeLessonContent ? (course.files || []).map(publicAttachment) : [];
   const announcements = canSeeLessonContent ? (course.announcements || []).slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))) : [];
   const oversight = canManageCourse(user, course);
-  return { ...publicCourse, teacherIds: tIds, canOversight: oversight, ...(oversight ? { enrollmentCode } : {}), teacherName: teacherNames, lessons, announcements, ...p,
+  return { ...publicCourse, files, teacherIds: tIds, canOversight: oversight, ...(oversight ? { enrollmentCode } : {}), teacherName: teacherNames, lessons, announcements, ...p,
     studentCount: db.enrollments.filter(e => e.courseId === course.id).length, quizAvailable: Boolean(quizByCourse(course.id)?.questions.length) };
 }
 function ensureCourseChatRoom(course) {
@@ -481,6 +482,29 @@ function readBinary(req, limit) {
     req.on('error', reject);
   });
 }
+const MAX_GENERAL_FILE = 80 * 1024 * 1024;
+const ALLOWED_GENERAL_EXTS = new Set([
+  '.pdf', '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx',
+  '.txt', '.md', '.csv', '.rtf', '.wps', '.et', '.dps',
+  '.mp4', '.webm', '.ogg', '.mov', '.avi', '.mkv',
+  '.mp3', '.wav', '.m4a', '.aac', '.flac',
+  '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg',
+  '.zip', '.rar', '.7z', '.tar', '.gz',
+  '.py', '.js', '.ts', '.java', '.c', '.cpp', '.html', '.css', '.json', '.sql', '.ipynb'
+]);
+function validateGeneralFileUpload(req) {
+  const originalName = cleanFileName(req);
+  const dotIdx = originalName.lastIndexOf('.');
+  const ext = dotIdx > 0 ? originalName.slice(dotIdx).toLowerCase() : '';
+  if (!ext || !ALLOWED_GENERAL_EXTS.has(ext)) {
+    fail(415, '不支持的文件格式：' + (ext || '无后缀') + '（支持 PDF、Word、PPT、Excel、音视频、图片、压缩包、代码等格式）');
+  }
+  return { originalName, ext };
+}
+function publicAttachment(att) {
+  return { id: att.id, name: att.name, size: att.size, mimeType: att.mimeType, createdAt: att.createdAt };
+}
+
 function cleanFileName(req) {
   const raw = req.headers['x-file-name'];
   let decoded = Array.isArray(raw) ? raw[0] : (raw || 'File');
@@ -645,7 +669,7 @@ async function api(req, res, url) {
   const method = req.method;
   const pathname = url.pathname;
   const user = getUser(req);
-  const isBinary = pathname === '/api/profile/avatar' || /^\/api\/lessons\/[^/]+\/video$/.test(pathname) || /^\/api\/assignments\/[^/]+\/submission\/file$/.test(pathname) || /^\/api\/lessons\/[^/]+\/folders\/[^/]+\/files$/.test(pathname);
+  const isBinary = pathname === '/api/profile/avatar' || /^\/api\/lessons\/[^/]+\/video$/.test(pathname) || /^\/api\/lessons\/[^/]+\/files$/.test(pathname) || /^\/api\/courses\/[^/]+\/files$/.test(pathname) || /^\/api\/assignments\/[^/]+\/submission\/file$/.test(pathname) || /^\/api\/lessons\/[^/]+\/folders\/[^/]+\/files$/.test(pathname);
   const body = ['POST','PATCH','PUT'].includes(method) && !isBinary ? await readBody(req) : {};
   if (pathname === '/api/health' && method === 'GET') return json(res, 200, { ok: true });
   if (pathname === '/api/auth/me' && method === 'GET') return json(res, 200, { user: publicUser(user) });
@@ -2321,7 +2345,8 @@ async function api(req, res, url) {
     ownedCourse(user, course);
     if (method === 'PATCH') { Object.assign(course, courseFields(body, course), { updatedAt: now() }); save(); return json(res, 200, { course: serializeCourse(course, user) }); }
     if (method === 'DELETE') {
-      for (const lesson of course.lessons) { removeUpload(lesson.videoFile); for (const folder of lesson.resourceFolders || []) for (const file of folder.files || []) removeUpload(file); }
+      for (const cf of course.files || []) removeUpload(cf);
+      for (const lesson of course.lessons) { removeUpload(lesson.videoFile); for (const lf of lesson.files || []) removeUpload(lf); for (const folder of lesson.resourceFolders || []) for (const file of folder.files || []) removeUpload(file); }
       const assignmentIds = new Set(db.assignments.filter(a => a.courseId === course.id).map(a => a.id));
       for (const submission of db.submissions.filter(s => assignmentIds.has(s.assignmentId))) removeUpload(submission.file);
       db.assignments = db.assignments.filter(a => a.courseId !== course.id);
@@ -2351,6 +2376,7 @@ async function api(req, res, url) {
     const lesson = course.lessons.find(l => l.id === match[1]);
     if (method === 'PATCH') { Object.assign(lesson, lessonFields(body, lesson)); course.updatedAt = now(); save(); return json(res, 200, { lesson, course: serializeCourse(course, user) }); }
     removeUpload(lesson.videoFile);
+    for (const lf of lesson.files || []) removeUpload(lf);
     for (const folder of lesson.resourceFolders || []) for (const file of folder.files || []) removeUpload(file);
     course.lessons = course.lessons.filter(l => l.id !== lesson.id).map((l, order) => ({ ...l, order }));
     for (const e of db.enrollments.filter(e => e.courseId === course.id)) e.completedLessonIds = e.completedLessonIds.filter(x => x !== lesson.id);
@@ -2382,20 +2408,9 @@ async function api(req, res, url) {
     const { course, lesson } = courseByLesson(match[1]); ownedCourse(user, course);
     const folder = folderById(lesson, match[2]);
     if (folder.files.length >= MAX_FOLDER_FILES) fail(400, 'A folder supports at most 50 files');
-    const mime = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
-    const allowed = {
-      'application/pdf': '.pdf', 'application/msword': '.doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
-      'application/vnd.ms-powerpoint': '.ppt', 'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
-      'application/vnd.ms-excel': '.xls', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
-      'text/plain': '.txt', 'text/csv': '.csv', 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp',
-      'application/zip': '.zip', 'application/x-zip-compressed': '.zip'
-    };
-    const extension = allowed[mime];
-    if (!extension) fail(415, 'Unsupported teaching resource file type');
-    const originalName = cleanFileName(req);
-    if (!originalName.toLowerCase().endsWith(extension)) fail(415, 'File name does not match the declared format');
+    const { originalName, ext: extension } = validateGeneralFileUpload(req);
     if (folder.files.some(file => file.name.toLowerCase() === originalName.toLowerCase())) fail(409, 'A file with this name already exists in the folder');
-    const buffer = await readBinary(req, MAX_RESOURCE_FILE);
+    const buffer = await readBinary(req, MAX_GENERAL_FILE);
     const uploaded = await saveUpload(buffer, req, extension);
     const file = { id: id('resource'), ...uploaded, createdAt: now() };
     folder.files.push(file); course.updatedAt = now();
@@ -2417,6 +2432,69 @@ async function api(req, res, url) {
     const folder = folderById(lesson, match[2]);
     await Promise.all((folder.files || []).map(f => ensureLocalFile(f.storedName)));
     return streamZip(res, folder.files || [], UPLOAD_DIR, folder.name);
+  }
+  match = pathname.match(/^\/api\/courses\/([^/]+)\/files$/);
+  if (match && method === 'POST') {
+    const course = ownedCourse(user, courseById(match[1]));
+    const { originalName, ext } = validateGeneralFileUpload(req);
+    const buffer = await readBinary(req, MAX_GENERAL_FILE);
+    const uploaded = await saveUpload(buffer, req, ext);
+    const fileItem = { id: id('cfile'), ...uploaded, name: originalName, createdAt: now() };
+    (course.files ||= []).push(fileItem);
+    course.updatedAt = now();
+    try { save(); } catch (err) { course.files.pop(); removeUpload(fileItem); throw err; }
+    return json(res, 201, { file: publicAttachment(fileItem), course: serializeCourse(course, user) });
+  }
+  match = pathname.match(/^\/api\/courses\/([^/]+)\/files\/([^/]+)$/);
+  if (match && ['GET', 'DELETE'].includes(method)) {
+    const course = courseById(match[1]);
+    if (method === 'GET') {
+      canStudy(user, course);
+      const fileItem = (course.files || []).find(f => f.id === match[2]);
+      if (!fileItem) fail(404, 'Course file not found');
+      const isInline = ['.mp4', '.webm', '.ogg', '.pdf', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.mp3', '.wav', '.m4a'].some(e => fileItem.name.toLowerCase().endsWith(e));
+      return streamUpload(req, res, fileItem, isInline);
+    }
+    ownedCourse(user, course);
+    const fileItem = (course.files || []).find(f => f.id === match[2]);
+    if (!fileItem) fail(404, 'Course file not found');
+    course.files = course.files.filter(f => f.id !== fileItem.id);
+    removeUpload(fileItem);
+    course.updatedAt = now();
+    save();
+    return json(res, 200, { ok: true, course: serializeCourse(course, user) });
+  }
+  match = pathname.match(/^\/api\/lessons\/([^/]+)\/files$/);
+  if (match && method === 'POST') {
+    const { course, lesson } = courseByLesson(match[1]);
+    ownedCourse(user, course);
+    const { originalName, ext } = validateGeneralFileUpload(req);
+    const buffer = await readBinary(req, MAX_GENERAL_FILE);
+    const uploaded = await saveUpload(buffer, req, ext);
+    const fileItem = { id: id('lfile'), ...uploaded, name: originalName, createdAt: now() };
+    (lesson.files ||= []).push(fileItem);
+    course.updatedAt = now();
+    try { save(); } catch (err) { lesson.files.pop(); removeUpload(fileItem); throw err; }
+    return json(res, 201, { file: publicAttachment(fileItem), course: serializeCourse(course, user) });
+  }
+  match = pathname.match(/^\/api\/lessons\/([^/]+)\/files\/([^/]+)$/);
+  if (match && ['GET', 'DELETE'].includes(method)) {
+    const { course, lesson } = courseByLesson(match[1]);
+    if (method === 'GET') {
+      canStudy(user, course);
+      const fileItem = (lesson.files || []).find(f => f.id === match[2]);
+      if (!fileItem) fail(404, 'Lesson file not found');
+      const isInline = ['.mp4', '.webm', '.ogg', '.pdf', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.mp3', '.wav', '.m4a'].some(e => fileItem.name.toLowerCase().endsWith(e));
+      return streamUpload(req, res, fileItem, isInline);
+    }
+    ownedCourse(user, course);
+    const fileItem = (lesson.files || []).find(f => f.id === match[2]);
+    if (!fileItem) fail(404, 'Lesson file not found');
+    lesson.files = lesson.files.filter(f => f.id !== fileItem.id);
+    removeUpload(fileItem);
+    course.updatedAt = now();
+    save();
+    return json(res, 200, { ok: true, course: serializeCourse(course, user) });
   }
   match = pathname.match(/^\/api\/lessons\/([^/]+)\/video$/);
   if (match && ['GET', 'POST'].includes(method)) {

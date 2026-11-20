@@ -33,11 +33,21 @@
     if (state.modal?.type === 'submission-grade') return submissionGradeModal();
     let html = baseModal();
     if (state.modal?.type === 'course') {
-      const field = '<div class="field"><label for="course-code">Course Enrollment Code</label><input id="course-code" name="enrollmentCode" value="' + esc(state.modal.course?.enrollmentCode || '') + '" maxlength="20" pattern="[A-Za-z0-9-]{4,20}" placeholder="Leave blank to generate automatically"><div class="field-hint">4–20 letters, numbers, or hyphens. Students need this code to join the course.</div></div>';
+      const existingFiles = state.modal.course?.files || [];
+      const existingList = existingFiles.length
+        ? '<div style="margin-top:8px;display:grid;gap:6px">' + existingFiles.map(cf => '<div class="lesson-file-row"><span>📎 ' + esc(cf.name) + ' <small class="muted">(' + formatBytes(cf.size) + ')</small></span><button type="button" class="btn btn-danger btn-sm" data-action="delete-course-file" data-course-id="' + esc(state.modal.course.id) + '" data-id="' + esc(cf.id) + '">删除</button></div>').join('') + '</div>'
+        : '';
+      const field = '<div class="field"><label for="course-code">Course Enrollment Code</label><input id="course-code" name="enrollmentCode" value="' + esc(state.modal.course?.enrollmentCode || '') + '" maxlength="20" pattern="[A-Za-z0-9-]{4,20}" placeholder="Leave blank to generate automatically"><div class="field-hint">4–20 letters, numbers, or hyphens. Students need this code to join the course.</div></div>' +
+        '<div class="field"><label for="course-files-upload">上传课程资料 / 课件文件（支持多选，不限格式）</label><input id="course-files-upload" type="file" multiple><div class="field-hint">支持 PDF、Word、PPT、Excel、视频、音频、图片、压缩包、代码等任意教学文件（单文件最大 80 MB）。</div>' + existingList + '</div>';
       return html.replace('<div class="field"><label for="course-color">', field + '<div class="field"><label for="course-color">');
     }
     if (state.modal?.type === 'lesson') {
-      const field = '<div class="field"><label for="lesson-upload">Upload Video (Optional)</label><input id="lesson-upload" type="file" accept="video/mp4,video/webm,video/ogg"><div class="field-hint">MP4, WebM, or OGG. The video uploads when you save the lesson.</div></div>';
+      const existingLessonFiles = state.modal.lesson?.files || [];
+      const existingLessonList = existingLessonFiles.length
+        ? '<div style="margin-top:8px;display:grid;gap:6px">' + existingLessonFiles.map(lf => '<div class="lesson-file-row"><span>📎 ' + esc(lf.name) + ' <small class="muted">(' + formatBytes(lf.size) + ')</small></span><button type="button" class="btn btn-danger btn-sm" data-action="delete-lesson-att" data-lesson-id="' + esc(state.modal.lesson.id) + '" data-id="' + esc(lf.id) + '">删除</button></div>').join('') + '</div>'
+        : '';
+      const field = '<div class="field"><label for="lesson-upload">上传课时视频（可选）</label><input id="lesson-upload" type="file" accept="video/mp4,video/webm,video/ogg"><div class="field-hint">支持 MP4 / WebM / OGG 视频在线播放（最大 80 MB）。</div></div>' +
+        '<div class="field"><label for="lesson-att-upload">上传课时课件 / 多种格式附件（可选，支持多选）</label><input id="lesson-att-upload" type="file" multiple><div class="field-hint">支持 PDF、Word(.doc/.docx)、PPT(.ppt/.pptx)、Excel(.xls/.xlsx)、音频、图片、ZIP 压缩包、代码等任意格式（单文件最大 80 MB）。</div>' + existingLessonList + '</div>';
       const boundary = '</div><div class="modal-actions">';
       const offset = html.lastIndexOf(boundary);
       return offset < 0 ? html : html.slice(0, offset) + field + html.slice(offset);
@@ -113,10 +123,23 @@
         html = html.slice(0, tabsEnd) + selectedPanel + html.slice(end);
       }
     }
+    const cFiles = state.selectedCourse.files || [];
+    const canSeeFiles = teacher || state.selectedCourse.enrolled;
+    const courseFilesCard = canSeeFiles && (cFiles.length || teacher)
+      ? '<section class="panel panel-pad" style="margin-bottom:18px"><div class="row-between wrap"><div><h3 style="margin:0 0 4px">📂 课程公共资料与课件 (' + cFiles.length + ' 个文件)</h3><p class="tiny muted" style="margin:0">支持 PDF、Word、PPT、Excel、音视频、图片、压缩包、代码等任意格式在线预览或下载</p></div>' +
+        (teacher ? '<form id="course-quick-file-form" class="row wrap" style="gap:8px"><input type="file" name="files" multiple required style="max-width:260px;min-height:36px;padding:6px 10px;font-size:12px"><button type="submit" class="btn btn-primary btn-sm">+ 上传文件</button></form>' : '') +
+        '</div>' +
+        (cFiles.length ? '<div style="margin-top:12px;display:grid;gap:8px">' + cFiles.map(cf => {
+          const href = '/api/courses/' + encodeURIComponent(state.selectedCourse.id) + '/files/' + encodeURIComponent(cf.id);
+          return '<div class="lesson-file-row"><span>📎 <strong>' + esc(cf.name) + '</strong> <small class="muted">(' + formatBytes(cf.size) + ')</small></span><div class="row wrap"><a class="btn btn-soft btn-sm" href="' + href + '" target="_blank" rel="noopener">查看 / 下载</a>' + (teacher ? '<button type="button" class="btn btn-danger btn-sm" data-action="delete-course-file" data-course-id="' + esc(state.selectedCourse.id) + '" data-id="' + esc(cf.id) + '">删除</button>' : '') + '</div></div>';
+        }).join('') + '</div>' : '<p class="small muted" style="margin:10px 0 0">暂未上传课程公共资料，点击右上角可上传任意格式文件。</p>') +
+        '</section>'
+      : '';
     if (teacher) {
       const code = '<div class="course-code"><span>Enrollment code for this course</span><strong>' + esc(state.selectedCourse.enrollmentCode || 'Not generated') + '</strong><small>Share this code only with students in this course</small></div>';
-      html = html.replace('<div class="detail-layout">', code + '<div class="detail-layout">');
+      html = html.replace('<div class="detail-layout">', code + courseFilesCard + '<div class="detail-layout">');
     } else {
+      html = html.replace('<div class="detail-layout">', courseFilesCard + '<div class="detail-layout">'); else {
       html = html.replaceAll('data-action="enroll"', 'data-action="show-enroll-code"');
       if (state.selectedCourse.enrolled) html = html.replace('<div class="detail-layout">', '<div class="row" style="justify-content:flex-end;margin:10px 0 16px"><button class="btn btn-danger btn-sm" data-action="unenroll" data-id="' + esc(state.selectedCourse.id) + '">Withdraw from This Course</button></div><div class="detail-layout">');
     }
@@ -128,6 +151,14 @@
     if (lesson?.videoFileUrl) {
       const video = `<div class="video-uploaded"><p class="small muted">Teacher-uploaded video</p><video class="lesson-video" controls preload="metadata" src="${esc(lesson.videoFileUrl)}">Your browser does not support video playback.</video></div>`;
       html = html.replace('</section>', video + '</section>');
+    }
+    if (lesson && (lesson.files || []).length) {
+      const lFilesHtml = `<div class="lesson-resources" style="margin-top:14px;padding-top:14px"><h4 style="margin:0 0 8px">📎 本课时附件与资料 (${lesson.files.length})</h4>` +
+        lesson.files.map(lf => {
+          const href = '/api/lessons/' + encodeURIComponent(lesson.id) + '/files/' + encodeURIComponent(lf.id);
+          return `<div class="lesson-file-row"><span>📄 <strong>${esc(lf.name)}</strong> <small class="muted">(${formatBytes(lf.size)})</small></span><div class="row wrap"><a class="btn btn-soft btn-sm" href="${href}" target="_blank" rel="noopener">查看 / 下载</a>${['teacher','admin'].includes(state.user.role) ? `<button type="button" class="btn btn-danger btn-sm" data-action="delete-lesson-att" data-lesson-id="${esc(lesson.id)}" data-id="${esc(lf.id)}">删除</button>` : ''}</div></div>`;
+        }).join('') + `</div>`;
+      html = html.replace('</section>', lFilesHtml + '</section>');
     }
     if (lesson && (['teacher','admin'].includes(state.user.role) || course.enrolled)) {
       html = html.replace('</section>', lessonResourcesPanel(lesson.id) + '</section>');
@@ -150,7 +181,7 @@
     const fileRows = (folder.files || []).map(file => `<div class="lesson-file-row"><span>▤ ${esc(file.name)}</span><span class="small muted">${formatBytes(file.size)}</span>${teacher ? `<button type="button" class="btn btn-danger btn-sm" data-action="delete-lesson-file" data-lesson-id="${esc(lessonId)}" data-folder-id="${folderId}" data-id="${esc(file.id)}" aria-label="Delete ${esc(file.name)}">Delete</button>` : ''}</div>`).join('');
     const download = (folder.files || []).length ? `<a class="btn btn-soft btn-sm" href="/api/lessons/${encodeURIComponent(lessonId)}/folders/${encodeURIComponent(folder.id)}/download" download>Download Folder (.zip)</a>` : '';
     const controls = teacher ? `<button type="button" class="btn btn-danger btn-sm" data-action="delete-lesson-folder" data-lesson-id="${esc(lessonId)}" data-id="${folderId}">Delete Folder</button>` : '';
-    const upload = teacher ? `<form class="lesson-file-upload" data-lesson-id="${esc(lessonId)}" data-folder-id="${folderId}"><label for="lesson-files-${folderId}">Add Files</label><div class="row"><input id="lesson-files-${folderId}" type="file" name="files" multiple accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.csv,.png,.jpg,.jpeg,.webp,.zip" required><button class="btn btn-primary btn-sm" type="submit">Upload Files</button></div><p class="tiny muted">Up to 15 MB per file, maximum 50 files in a folder.</p></form>` : '';
+    const upload = teacher ? `<form class="lesson-file-upload" data-lesson-id="${esc(lessonId)}" data-folder-id="${folderId}"><label for="lesson-files-${folderId}">Add Files</label><div class="row"><input id="lesson-files-${folderId}" type="file" name="files" multiple  required><button class="btn btn-primary btn-sm" type="submit">Upload Files</button></div><p class="tiny muted">Up to 15 MB per file, maximum 50 files in a folder.</p></form>` : '';
     return `<section class="lesson-folder-card"><div class="row-between"><div><strong>▣ ${esc(folder.name)}</strong><p class="tiny muted">${(folder.files || []).length} files</p></div><div class="row wrap">${download}${controls}</div></div>${fileRows || '<p class="small muted">This folder is empty.</p>'}${upload}</section>`;
   }
   function formatBytes(bytes) {
@@ -219,8 +250,8 @@
     state.gradebook = await api('/api/courses/' + encodeURIComponent(state.selectedCourse.id) + '/gradebook');
   }
   async function uploadFile(endpoint, file) {
-    const limit = endpoint.includes('/video') ? 80 * 1024 * 1024 : 15 * 1024 * 1024;
-    if (file.size > limit) throw new Error(endpoint.includes('/video') ? 'Video files must not exceed 80 MB' : 'Assignment files must not exceed 15 MB');
+    const limit = endpoint.includes('/submission/') ? 15 * 1024 * 1024 : 80 * 1024 * 1024;
+    if (file.size > limit) throw new Error(endpoint.includes('/submission/') ? 'Assignment files must not exceed 15 MB' : '单个文件不能超过 80 MB');
     const ext = file.name.toLowerCase().split('.').pop();
     const fallback = {mp4:'video/mp4',webm:'video/webm',ogg:'video/ogg',pdf:'application/pdf',doc:'application/msword',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',txt:'text/plain',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg'};
     const contentType = fallback[ext] || file.type || 'application/octet-stream';
@@ -251,6 +282,36 @@
           }
         }, 'Could not load lesson files: ');
       }
+      return;
+    }
+    if (action === 'delete-course-file') {
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (!confirm('确定删除这个课程文件吗？')) return;
+      const cid = node.dataset.courseId;
+      run(async () => {
+        await api('/api/courses/' + encodeURIComponent(cid) + '/files/' + encodeURIComponent(id), { method: 'DELETE' });
+        await refreshCourses();
+        await reloadSelected();
+        if (state.modal?.type === 'course' && state.selectedCourse) state.modal.course = state.selectedCourse;
+        render();
+        showToast('文件已删除');
+      }, '删除失败: ');
+      return;
+    }
+    if (action === 'delete-lesson-att') {
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (!confirm('确定删除这个课时附件吗？')) return;
+      const lid = node.dataset.lessonId;
+      run(async () => {
+        await api('/api/lessons/' + encodeURIComponent(lid) + '/files/' + encodeURIComponent(id), { method: 'DELETE' });
+        await refreshCourses();
+        await reloadSelected();
+        if (state.modal?.type === 'lesson' && state.selectedCourse) {
+          state.modal.lesson = state.selectedCourse.lessons.find(l => l.id === lid) || state.modal.lesson;
+        }
+        render();
+        showToast('附件已删除');
+      }, '删除失败: ');
       return;
     }
     if (action === 'delete-lesson-folder') {
@@ -349,10 +410,9 @@
       const files = Array.from(form.querySelector('input[type=file]')?.files || []);
       const folder = state.lessonFolders.find(x => x.id === folderId);
       if (!files.length) { showToast('Choose files to upload', true); return; }
-      const allowedExtensions = new Set(['pdf','doc','docx','ppt','pptx','xls','xlsx','txt','csv','png','jpg','jpeg','webp','zip']);
-      if (files.some(file => !allowedExtensions.has(file.name.toLowerCase().split('.').pop()))) { showToast('Only PDF, Word, PowerPoint, Excel, text, image, or ZIP files are supported', true); return; }
+      // All general teaching file extensions validated on backend
       if ((folder?.files?.length || 0) + files.length > 50) { showToast('A folder can contain at most 50 files', true); return; }
-      if (files.some(file => file.size > 15 * 1024 * 1024)) { showToast('Each file must be 15 MB or less', true); return; }
+      if (files.some(file => file.size > 80 * 1024 * 1024)) { showToast('单个文件不能超过 80 MB', true); return; }
       run(async () => {
         const types = {pdf:'application/pdf',doc:'application/msword',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',ppt:'application/vnd.ms-powerpoint',pptx:'application/vnd.openxmlformats-officedocument.presentationml.presentation',xls:'application/vnd.ms-excel',xlsx:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',txt:'text/plain',csv:'text/csv',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp',zip:'application/zip'};
         for (const file of files) {
@@ -369,26 +429,75 @@
       }, 'File upload failed: ');
       return;
     }
+    if (form.id === 'course-quick-file-form') {
+      event.preventDefault(); event.stopImmediatePropagation();
+      const files = Array.from(form.querySelector('input[type=file]')?.files || []);
+      if (!files.length) { showToast('请先选择要上传的文件', true); return; }
+      if (files.some(f => f.size > 80 * 1024 * 1024)) { showToast('单个文件不能超过 80 MB', true); return; }
+      run(async () => {
+        for (const f of files) {
+          await uploadFile('/api/courses/' + encodeURIComponent(state.selectedCourse.id) + '/files', f);
+        }
+        await refreshCourses();
+        await reloadSelected();
+        showToast(`已成功上传 ${files.length} 个课程文件`);
+      }, '上传失败: ');
+      return;
+    }
     if (form.id === 'course-form') {
       const code = form.querySelector('[name="enrollmentCode"]');
       if (code && !code.value.trim()) code.disabled = true;
+      const files = Array.from(form.querySelector('#course-files-upload')?.files || []);
+      if (!files.length) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (files.some(f => f.size > 80 * 1024 * 1024)) { showToast('单个文件不能超过 80 MB', true); return; }
+      const d = Object.fromEntries(new FormData(form));
+      const current = state.modal?.course;
+      run(async () => {
+        const path = current?.id ? `/api/courses/${encodeURIComponent(current.id)}` : '/api/courses';
+        const method = current?.id ? 'PATCH' : 'POST';
+        const result = await api(path, { method, body: JSON.stringify(d) });
+        const courseId = result.course?.id || current?.id;
+        for (const f of files) {
+          await uploadFile(`/api/courses/${encodeURIComponent(courseId)}/files`, f);
+        }
+        state.modal = null;
+        await refreshCourses();
+        await refreshOverview();
+        if (state.page === 'detail' && current?.id) await reloadSelected();
+        else if (!current?.id && courseId) await loadCourse(courseId);
+        else render();
+        showToast(`课程及 ${files.length} 个文件已保存`);
+      }, '保存课程或上传文件失败: ');
       return;
     }
     if (form.id === 'lesson-form') {
-      const file = form.querySelector('#lesson-upload')?.files?.[0];
-      if (!file) return;
+      const videoFile = form.querySelector('#lesson-upload')?.files?.[0];
+      const attFiles = Array.from(form.querySelector('#lesson-att-upload')?.files || []);
+      if (!videoFile && !attFiles.length) return;
       event.preventDefault(); event.stopImmediatePropagation();
-      if (file.size > 80 * 1024 * 1024) { showToast('Video files must not exceed 80 MB', true); return; }
-      if (!['mp4','webm','ogg'].includes(file.name.toLowerCase().split('.').pop())) { showToast('Only MP4, WebM, or OGG videos are supported', true); return; }
+      if (videoFile) {
+        if (videoFile.size > 80 * 1024 * 1024) { showToast('视频文件不能超过 80 MB', true); return; }
+        if (!['mp4','webm','ogg'].includes(videoFile.name.toLowerCase().split('.').pop())) { showToast('在线播放视频仅支持 MP4、WebM 或 OGG（其他格式请用下方附件上传）', true); return; }
+      }
+      if (attFiles.some(f => f.size > 80 * 1024 * 1024)) { showToast('单个附件不能超过 80 MB', true); return; }
       const data = Object.fromEntries(new FormData(form));
       const current = state.modal?.lesson;
       run(async () => {
         const endpoint = current?.id ? '/api/lessons/' + encodeURIComponent(current.id) : '/api/courses/' + encodeURIComponent(state.selectedCourse.id) + '/lessons';
-        const response = await api(endpoint, { method:current?.id ? 'PATCH' : 'POST', body:JSON.stringify(data) });
+        const response = await api(endpoint, { method: current?.id ? 'PATCH' : 'POST', body: JSON.stringify(data) });
         const lessonId = response.lesson?.id || current?.id;
-        await uploadFile('/api/lessons/' + encodeURIComponent(lessonId) + '/video', file);
-        state.modal = null; await refreshCourses(); await reloadSelected(); showToast('Lesson and video saved');
-      }, 'Video upload failed: ');
+        if (videoFile) {
+          await uploadFile('/api/lessons/' + encodeURIComponent(lessonId) + '/video', videoFile);
+        }
+        for (const f of attFiles) {
+          await uploadFile('/api/lessons/' + encodeURIComponent(lessonId) + '/files', f);
+        }
+        state.modal = null;
+        await refreshCourses();
+        await reloadSelected();
+        showToast('课时内容及全部文件已保存');
+      }, '上传失败: ');
       return;
     }
     if (form.id === 'enroll-code-form') {

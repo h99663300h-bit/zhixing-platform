@@ -159,6 +159,7 @@
       '<div class="field"><label for="admin-course-code">Enrollment Code (optional)</label><input id="admin-course-code" name="enrollmentCode" value="' + esc(editing?.enrollmentCode || '') + '" maxlength="20" placeholder="Leave blank to auto-generate"></div></div>' +
       '<div class="field"><label for="admin-course-desc">Description *</label><textarea id="admin-course-desc" name="description" rows="2" maxlength="2000" placeholder="Course goals and overview…" required>' + esc(editing?.description || '') + '</textarea></div>' +
       '<div class="field"><label>Assign Instructor(s) * (multi-select)</label>' + teacherCheckboxes + '</div>' +
+      '<div class="field"><label for="admin-course-files">上传课程资料 / 课件文件（可选，支持多选任意格式）</label><input id="admin-course-files" type="file" multiple><div class="field-hint">支持 PDF、Word、PPT、Excel、音视频、图片、压缩包、代码等（单文件最大 80 MB）。</div></div>' +
       '<div class="row wrap"><button type="submit" class="btn btn-primary">' + (editing ? 'Save Course Changes' : 'Create Course') + '</button>' +
       (editing ? '<button type="button" class="btn btn-light" data-admin-action="cancel-edit-course">Cancel</button>' : '') + '</div></form></section>';
     const filterBar = '<div class="filter-line" style="padding:0 20px 14px"><div class="searchbar"><span>⌕</span><input id="course-filter-q" data-admin-filter="course-q" type="search" value="' + esc(courseFilter.q) + '" placeholder="Search course, code, category, instructor"></div>' +
@@ -578,13 +579,29 @@
       if (!teacherIds.length) { showToast('Select at least one instructor', true); return; }
       const editId = form.dataset.id;
       const payload = { title: values.title, category: values.category, description: values.description, teacherIds, ...(values.enrollmentCode?.trim() ? { enrollmentCode: values.enrollmentCode.trim() } : {}) };
+      const cFiles = Array.from(form.querySelector('#admin-course-files')?.files || []);
+      if (cFiles.some(f => f.size > 80 * 1024 * 1024)) { showToast('单个文件不能超过 80 MB', true); return; }
       run(async () => {
-        if (editId) await api('/api/admin/courses/' + encodeURIComponent(editId), { method: 'PATCH', body: JSON.stringify(payload) });
-        else await api('/api/admin/courses', { method: 'POST', body: JSON.stringify(payload) });
+        const res = editId
+          ? await api('/api/admin/courses/' + encodeURIComponent(editId), { method: 'PATCH', body: JSON.stringify(payload) })
+          : await api('/api/admin/courses', { method: 'POST', body: JSON.stringify(payload) });
+        const cid = res.course?.id || editId;
+        for (const f of cFiles) {
+          const resp = await fetch('/api/courses/' + encodeURIComponent(cid) + '/files', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': f.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(f.name) },
+            body: f
+          });
+          if (!resp.ok) {
+            const errData = await resp.json().catch(() => ({}));
+            throw new Error(errData.error || '文件上传失败');
+          }
+        }
         courseEditItem = null;
         adminData = await api('/api/admin/overview');
         render();
-        showToast(editId ? 'Course updated' : 'Course created');
+        showToast(editId ? 'Course updated' : (cFiles.length ? `课程创建成功，已上传 ${cFiles.length} 个文件` : 'Course created'));
       }, 'Could not save course: ');
       return;
     }
